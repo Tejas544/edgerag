@@ -30,3 +30,7 @@ results/dry_run.jsonl
 # Personal planning docs -- not part of the deliverable
 00_FOUNDATIONS.md
 01_EDGERAG.md
+
+# Corpus artifacts are reproducible from scripts/build_corpus.py; images are ~1 GB.
+data/corpus.jsonl
+data/queries.jsonl

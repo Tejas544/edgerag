@@ -7,6 +7,9 @@ dependencies = [
     "torch",
     "torchvision",
     "transformers",
+    # Required by the SmolVLM processor itself -- transformers raises ImportError without it.
+    "num2words",
+    "datasets",
     "pillow",
     "numpy",
     "matplotlib",

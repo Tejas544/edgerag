@@ -1,0 +1,14 @@
+{
+  "n_docs": 362,
+  "n_queries": 650,
+  "docs_by_source": {
+    "infographicvqa": 250,
+    "docvqa": 112
+  },
+  "docs_with_ocr_text": 250,
+  "mean_text_chars": 940.4,
+  "docs_with_multiple_queries": 95,
+  "max_queries_per_doc": 11,
+  "queries_eval": 485,
+  "queries_heldout": 165
+}

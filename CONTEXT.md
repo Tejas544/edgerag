@@ -43,7 +43,14 @@ assumption until measured.*
 Escalation order: raise resolution → increase splitting → switch to Qwen2-VL-2B and pay the
 M-RoPE cost.
 
-> **MEASURED VALUE — fill in at Phase 1 gate:** `visual_tokens / total_prefill_tokens @ k=5 = ____`
+> ### ✅ MEASURED 2026-08-09 — GATE PASSED
+> `visual_tokens / total_prefill_tokens @ k=5` = **75.4% median** on the headline 2.2B
+> (mean 75.5%, range **54.7%–88.3%** over 40 queries, 362-page corpus).
+> **Even the worst-case query observed clears the 50% threshold.** Fixture agrees: 70.8% median.
+> Raw data `data/token_ratio_gate.json`; reproduce with `python -m scripts.measure_token_ratio`.
+>
+> The thesis is not marginal on this model. It holds with room to spare, without needing any
+> escalation on resolution or splitting. D1 stands; no model switch.
 
 ---
 
@@ -255,6 +262,104 @@ rather than the function level.
 **Revisit if:** the trace turns out to be unrepresentative (e.g. all retrieved contexts land in a
 narrow length band, hiding fragmentation behaviour). Then regenerate once, early, and re-baseline
 deliberately.
+
+---
+
+## D10 · Checkpoint variants, and the MHA finding · **ACCEPTED** · 2026-08-09
+
+**Decision:** Headline **`HuggingFaceTB/SmolVLM2-2.2B-Instruct`**, fixture
+**`HuggingFaceTB/SmolVLM2-256M-Video-Instruct`**. Both are `model_type: smolvlm`.
+
+**Rejected:** `HuggingFaceTB/SmolVLM-Instruct` (2.2B) and the 256M/500M SmolVLM-v1 checkpoints —
+these are `model_type: idefics3`. Mixing families across tiers would mean the forward pass is
+*tested* on one architecture and *shipped* on another. Matching `model_type` across tiers is worth
+more than any difference between the two families.
+
+### Finding 1 — the headline model is MHA, not GQA. This sizes the entire project.
+
+Config probe, 2026-08-09:
+
+| | 2.2B (headline) | 500M | 256M (fixture) |
+|---|---|---|---|
+| layers | 24 | 32 | 30 |
+| query heads | 32 | 15 | 9 |
+| **kv heads** | **32** | 5 | 3 |
+| attention | **MHA — no GQA saving** | GQA 3:1 | GQA 3:1 |
+| KV bytes/token fp16 | **196,608 (192 KiB)** | 40,960 | 23,040 |
+
+`2 × 24 layers × 32 kv-heads × 64 head-dim × 2 bytes = 196,608 B/token`.
+
+- One sequence at seq_len 2048 → **384 MiB**
+- **Batch 8 at seq_len 2048 → exactly 3.00 GiB, against a 4 GiB total budget.**
+
+The 2.2B checkpoint spends **8.5× more KV per token than the 256M fixture** despite having fewer
+layers, purely because it has no GQA. Encoded and tested in `edgerag/core/spec.py` /
+`tests/test_spec.py`.
+
+**Why this is good news:** the project's premise — that KV cache management is the binding
+constraint — is not a contrivance on this model, it is arithmetic. Paging, prefix sharing, and
+visual-token pruning all have more headroom to win than they would on a GQA model.
+
+**Consequence for testing:** the fixture exercises `n_rep=3` and the headline exercises `n_rep=1`.
+**Neither tier covers the other.** MHA is the degenerate case of GQA, so one code path serves both,
+but the `n_rep=1` path must be explicitly tested locally or it ships untested (`BUGS.md` P-08).
+
+**Consequence for the CV bullet:** *"my 2.2B VLM uses full MHA, so its KV cache is ~4× a
+comparable GQA model's — which is exactly why paging pays for itself here"* is a specific,
+checkable claim.
+
+### Finding 2 — visual token counts, and what the Phase 1 gate is really testing
+
+Pixel shuffle divides tower patches by `scale_factor²`:
+
+| | patches/side | scale_factor | **tokens per sub-image** |
+|---|---|---|---|
+| 2.2B | 384/14 = 27 → 729 | 3 | **81** |
+| 256M | 512/16 = 32 → 1024 | 4 | **64** |
+
+At 81 tokens, a *single un-split image* would make the D5 differentiator false. The thesis
+survives only through **image splitting**, where a 2×2 split costs 5 sub-images (4 tiles + 1
+global view) = **405 tokens/image**, and k=5 retrieval = **2025 visual tokens ≈ 380 MiB of KV**.
+
+So the Phase 1 gate is not really measuring the model — **it is measuring whether our processor
+configuration splits aggressively enough.** That reframes the escalation path: tune splitting and
+resolution *first*, and only consider the D1 model switch if splitting cannot get us there.
+
+**Revisit if:** the measured ratio lands below 50% even at maximum splitting.
+
+---
+
+## D11 · What the gate measurement forces · **ACCEPTED** · 2026-08-09
+
+The Phase 1 gate did more than clear a threshold — it produced the number the rest of the project
+is sized by.
+
+**One k=5 RAG query on the headline model costs 1,267 MiB of KV cache. 987 MiB of that is
+visual.** (median 6,758 prefill tokens × 192 KiB/token; 5,265 of those tokens are image tokens.)
+
+Three consequences, all of which change downstream work:
+
+**1. Two concurrent queries do not fit. At all.**
+Weights at INT4 (~1.1 GiB) + two queries (2.5 GiB) + activations already exceeds 4 GiB. A naive
+contiguous KV cache tops out at **one** in-flight request. The paged allocator is therefore not an
+optimisation on this project — it is the difference between a demo and a server. That is a far
+stronger framing for the README than "4–8× more concurrent sequences."
+
+**2. Visual token pruning moves from "differentiator" to "load-bearing".**
+78% of KV bytes are visual. A 50% visual prune reclaims ~494 MiB per query — more than the entire
+INT4 weight saving. The Phase 4 sweep should therefore be treated as a *memory* result first and a
+quality result second, and the plot's y-axis should be MiB reclaimed, not just % tokens removed.
+
+**3. Prefix sharing has a concrete, measured target.**
+95 of 362 corpus pages carry multiple questions (max 11). Those are real shared prefixes, not a
+synthetic scenario. At 11 questions against one page, CoW should save roughly 10 × the per-page
+visual KV cost.
+
+**Deferred to Phase 3, now that the numbers exist:** block size. At 192 KiB/token, a 16-token
+block is 3 MiB and a 4 GiB pool holds only ~1,300 blocks — so block-table overhead is negligible
+and internal fragmentation is expensive. This argues for **smaller** blocks than the default 16.
+Decide with a measured sweep, not by analogy to vLLM's defaults, which were tuned on GQA models
+with ~8× cheaper tokens.
 
 ---
 

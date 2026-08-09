@@ -1,0 +1,768 @@
+{
+  "summaries": [
+    {
+      "model_id": "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+      "k": 5,
+      "n_queries_measured": 40,
+      "visual_share_mean": 0.7553,
+      "visual_share_median": 0.7538,
+      "visual_share_min": 0.5474,
+      "visual_share_max": 0.8833,
+      "prefill_tokens_median": 6758,
+      "prefill_tokens_max": 7992,
+      "image_tokens_median": 5265,
+      "subimages_median": 65,
+      "tokens_per_subimage": 81,
+      "kv_bytes_per_token": 196608,
+      "kv_mib_median_prompt": 1267.1,
+      "kv_mib_from_visual_only": 987.2,
+      "gate_threshold": 0.5,
+      "gate_passed": true
+    },
+    {
+      "model_id": "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
+      "k": 5,
+      "n_queries_measured": 40,
+      "visual_share_mean": 0.7107,
+      "visual_share_median": 0.7075,
+      "visual_share_min": 0.4886,
+      "visual_share_max": 0.8567,
+      "prefill_tokens_median": 5683,
+      "prefill_tokens_max": 6751,
+      "image_tokens_median": 4160,
+      "subimages_median": 65,
+      "tokens_per_subimage": 64,
+      "kv_bytes_per_token": 23040,
+      "kv_mib_median_prompt": 124.9,
+      "kv_mib_from_visual_only": 91.4,
+      "gate_threshold": 0.5,
+      "gate_passed": true
+    }
+  ],
+  "per_query": {
+    "HuggingFaceTB/SmolVLM2-2.2B-Instruct": [
+      {
+        "query_id": "docvqa:317",
+        "total_tokens": 7795,
+        "image_tokens": 6885,
+        "text_tokens": 910,
+        "n_subimages": 85,
+        "k": 5,
+        "visual_share": 0.8833
+      },
+      {
+        "query_id": "infographicvqa:91234",
+        "total_tokens": 7464,
+        "image_tokens": 5913,
+        "text_tokens": 1551,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7922
+      },
+      {
+        "query_id": "infographicvqa:98322",
+        "total_tokens": 5199,
+        "image_tokens": 3645,
+        "text_tokens": 1554,
+        "n_subimages": 45,
+        "k": 5,
+        "visual_share": 0.7011
+      },
+      {
+        "query_id": "infographicvqa:91139",
+        "total_tokens": 7992,
+        "image_tokens": 5913,
+        "text_tokens": 2079,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7399
+      },
+      {
+        "query_id": "docvqa:57884",
+        "total_tokens": 7664,
+        "image_tokens": 5589,
+        "text_tokens": 2075,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.7293
+      },
+      {
+        "query_id": "infographicvqa:98429",
+        "total_tokens": 7070,
+        "image_tokens": 5265,
+        "text_tokens": 1805,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.7447
+      },
+      {
+        "query_id": "infographicvqa:91046",
+        "total_tokens": 7375,
+        "image_tokens": 5265,
+        "text_tokens": 2110,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.7139
+      },
+      {
+        "query_id": "infographicvqa:91163",
+        "total_tokens": 6393,
+        "image_tokens": 4293,
+        "text_tokens": 2100,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6715
+      },
+      {
+        "query_id": "docvqa:49326",
+        "total_tokens": 7255,
+        "image_tokens": 5589,
+        "text_tokens": 1666,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.7704
+      },
+      {
+        "query_id": "infographicvqa:91559",
+        "total_tokens": 6078,
+        "image_tokens": 4617,
+        "text_tokens": 1461,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7596
+      },
+      {
+        "query_id": "infographicvqa:98356",
+        "total_tokens": 7605,
+        "image_tokens": 5265,
+        "text_tokens": 2340,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.6923
+      },
+      {
+        "query_id": "infographicvqa:98420",
+        "total_tokens": 6440,
+        "image_tokens": 4293,
+        "text_tokens": 2147,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6666
+      },
+      {
+        "query_id": "infographicvqa:98331",
+        "total_tokens": 6145,
+        "image_tokens": 4617,
+        "text_tokens": 1528,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7513
+      },
+      {
+        "query_id": "docvqa:16553",
+        "total_tokens": 7270,
+        "image_tokens": 6237,
+        "text_tokens": 1033,
+        "n_subimages": 77,
+        "k": 5,
+        "visual_share": 0.8579
+      },
+      {
+        "query_id": "docvqa:613",
+        "total_tokens": 7097,
+        "image_tokens": 5913,
+        "text_tokens": 1184,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.8332
+      },
+      {
+        "query_id": "docvqa:397",
+        "total_tokens": 6190,
+        "image_tokens": 5265,
+        "text_tokens": 925,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.8506
+      },
+      {
+        "query_id": "docvqa:16990",
+        "total_tokens": 6330,
+        "image_tokens": 4293,
+        "text_tokens": 2037,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6782
+      },
+      {
+        "query_id": "docvqa:376",
+        "total_tokens": 6456,
+        "image_tokens": 4617,
+        "text_tokens": 1839,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7151
+      },
+      {
+        "query_id": "infographicvqa:91287",
+        "total_tokens": 7739,
+        "image_tokens": 6561,
+        "text_tokens": 1178,
+        "n_subimages": 81,
+        "k": 5,
+        "visual_share": 0.8478
+      },
+      {
+        "query_id": "infographicvqa:91140",
+        "total_tokens": 6704,
+        "image_tokens": 4941,
+        "text_tokens": 1763,
+        "n_subimages": 61,
+        "k": 5,
+        "visual_share": 0.737
+      },
+      {
+        "query_id": "infographicvqa:91397",
+        "total_tokens": 7859,
+        "image_tokens": 5913,
+        "text_tokens": 1946,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7524
+      },
+      {
+        "query_id": "infographicvqa:91232",
+        "total_tokens": 6638,
+        "image_tokens": 4617,
+        "text_tokens": 2021,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.6955
+      },
+      {
+        "query_id": "infographicvqa:98329",
+        "total_tokens": 6077,
+        "image_tokens": 4293,
+        "text_tokens": 1784,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.7064
+      },
+      {
+        "query_id": "docvqa:57770",
+        "total_tokens": 5921,
+        "image_tokens": 4617,
+        "text_tokens": 1304,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7798
+      },
+      {
+        "query_id": "docvqa:398",
+        "total_tokens": 7477,
+        "image_tokens": 5913,
+        "text_tokens": 1564,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7908
+      },
+      {
+        "query_id": "docvqa:39079",
+        "total_tokens": 7630,
+        "image_tokens": 6561,
+        "text_tokens": 1069,
+        "n_subimages": 81,
+        "k": 5,
+        "visual_share": 0.8599
+      },
+      {
+        "query_id": "infographicvqa:90991",
+        "total_tokens": 5384,
+        "image_tokens": 2997,
+        "text_tokens": 2387,
+        "n_subimages": 37,
+        "k": 5,
+        "visual_share": 0.5566
+      },
+      {
+        "query_id": "docvqa:57810",
+        "total_tokens": 5584,
+        "image_tokens": 4293,
+        "text_tokens": 1291,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.7688
+      },
+      {
+        "query_id": "docvqa:49530",
+        "total_tokens": 6563,
+        "image_tokens": 5589,
+        "text_tokens": 974,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.8516
+      },
+      {
+        "query_id": "infographicvqa:90995",
+        "total_tokens": 6488,
+        "image_tokens": 4617,
+        "text_tokens": 1871,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7116
+      },
+      {
+        "query_id": "docvqa:582",
+        "total_tokens": 6812,
+        "image_tokens": 5265,
+        "text_tokens": 1547,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.7729
+      },
+      {
+        "query_id": "infographicvqa:91114",
+        "total_tokens": 7750,
+        "image_tokens": 5913,
+        "text_tokens": 1837,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.763
+      },
+      {
+        "query_id": "docvqa:57783",
+        "total_tokens": 7083,
+        "image_tokens": 5913,
+        "text_tokens": 1170,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.8348
+      },
+      {
+        "query_id": "docvqa:57880",
+        "total_tokens": 6871,
+        "image_tokens": 5589,
+        "text_tokens": 1282,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.8134
+      },
+      {
+        "query_id": "infographicvqa:98451",
+        "total_tokens": 7846,
+        "image_tokens": 5589,
+        "text_tokens": 2257,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.7123
+      },
+      {
+        "query_id": "docvqa:57387",
+        "total_tokens": 6972,
+        "image_tokens": 5265,
+        "text_tokens": 1707,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.7552
+      },
+      {
+        "query_id": "docvqa:57825",
+        "total_tokens": 6670,
+        "image_tokens": 5589,
+        "text_tokens": 1081,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.8379
+      },
+      {
+        "query_id": "infographicvqa:90989",
+        "total_tokens": 6067,
+        "image_tokens": 3321,
+        "text_tokens": 2746,
+        "n_subimages": 41,
+        "k": 5,
+        "visual_share": 0.5474
+      },
+      {
+        "query_id": "docvqa:57431",
+        "total_tokens": 6356,
+        "image_tokens": 4617,
+        "text_tokens": 1739,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7264
+      },
+      {
+        "query_id": "docvqa:49546",
+        "total_tokens": 5889,
+        "image_tokens": 4941,
+        "text_tokens": 948,
+        "n_subimages": 61,
+        "k": 5,
+        "visual_share": 0.839
+      }
+    ],
+    "HuggingFaceTB/SmolVLM2-256M-Video-Instruct": [
+      {
+        "query_id": "docvqa:317",
+        "total_tokens": 6350,
+        "image_tokens": 5440,
+        "text_tokens": 910,
+        "n_subimages": 85,
+        "k": 5,
+        "visual_share": 0.8567
+      },
+      {
+        "query_id": "infographicvqa:91234",
+        "total_tokens": 6223,
+        "image_tokens": 4672,
+        "text_tokens": 1551,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7508
+      },
+      {
+        "query_id": "infographicvqa:98322",
+        "total_tokens": 4434,
+        "image_tokens": 2880,
+        "text_tokens": 1554,
+        "n_subimages": 45,
+        "k": 5,
+        "visual_share": 0.6495
+      },
+      {
+        "query_id": "infographicvqa:91139",
+        "total_tokens": 6751,
+        "image_tokens": 4672,
+        "text_tokens": 2079,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.692
+      },
+      {
+        "query_id": "docvqa:57884",
+        "total_tokens": 6491,
+        "image_tokens": 4416,
+        "text_tokens": 2075,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.6803
+      },
+      {
+        "query_id": "infographicvqa:98429",
+        "total_tokens": 5965,
+        "image_tokens": 4160,
+        "text_tokens": 1805,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.6974
+      },
+      {
+        "query_id": "infographicvqa:91046",
+        "total_tokens": 6270,
+        "image_tokens": 4160,
+        "text_tokens": 2110,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.6635
+      },
+      {
+        "query_id": "infographicvqa:91163",
+        "total_tokens": 5492,
+        "image_tokens": 3392,
+        "text_tokens": 2100,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6176
+      },
+      {
+        "query_id": "docvqa:49326",
+        "total_tokens": 6082,
+        "image_tokens": 4416,
+        "text_tokens": 1666,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.7261
+      },
+      {
+        "query_id": "infographicvqa:91559",
+        "total_tokens": 5109,
+        "image_tokens": 3648,
+        "text_tokens": 1461,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.714
+      },
+      {
+        "query_id": "infographicvqa:98356",
+        "total_tokens": 6500,
+        "image_tokens": 4160,
+        "text_tokens": 2340,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.64
+      },
+      {
+        "query_id": "infographicvqa:98420",
+        "total_tokens": 5539,
+        "image_tokens": 3392,
+        "text_tokens": 2147,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6124
+      },
+      {
+        "query_id": "infographicvqa:98331",
+        "total_tokens": 5176,
+        "image_tokens": 3648,
+        "text_tokens": 1528,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7048
+      },
+      {
+        "query_id": "docvqa:16553",
+        "total_tokens": 5961,
+        "image_tokens": 4928,
+        "text_tokens": 1033,
+        "n_subimages": 77,
+        "k": 5,
+        "visual_share": 0.8267
+      },
+      {
+        "query_id": "docvqa:613",
+        "total_tokens": 5856,
+        "image_tokens": 4672,
+        "text_tokens": 1184,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7978
+      },
+      {
+        "query_id": "docvqa:397",
+        "total_tokens": 5085,
+        "image_tokens": 4160,
+        "text_tokens": 925,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.8181
+      },
+      {
+        "query_id": "docvqa:16990",
+        "total_tokens": 5429,
+        "image_tokens": 3392,
+        "text_tokens": 2037,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6248
+      },
+      {
+        "query_id": "docvqa:376",
+        "total_tokens": 5487,
+        "image_tokens": 3648,
+        "text_tokens": 1839,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.6648
+      },
+      {
+        "query_id": "infographicvqa:91287",
+        "total_tokens": 6362,
+        "image_tokens": 5184,
+        "text_tokens": 1178,
+        "n_subimages": 81,
+        "k": 5,
+        "visual_share": 0.8148
+      },
+      {
+        "query_id": "infographicvqa:91140",
+        "total_tokens": 5667,
+        "image_tokens": 3904,
+        "text_tokens": 1763,
+        "n_subimages": 61,
+        "k": 5,
+        "visual_share": 0.6889
+      },
+      {
+        "query_id": "infographicvqa:91397",
+        "total_tokens": 6618,
+        "image_tokens": 4672,
+        "text_tokens": 1946,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.706
+      },
+      {
+        "query_id": "infographicvqa:91232",
+        "total_tokens": 5669,
+        "image_tokens": 3648,
+        "text_tokens": 2021,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.6435
+      },
+      {
+        "query_id": "infographicvqa:98329",
+        "total_tokens": 5176,
+        "image_tokens": 3392,
+        "text_tokens": 1784,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.6553
+      },
+      {
+        "query_id": "docvqa:57770",
+        "total_tokens": 4952,
+        "image_tokens": 3648,
+        "text_tokens": 1304,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.7367
+      },
+      {
+        "query_id": "docvqa:398",
+        "total_tokens": 6236,
+        "image_tokens": 4672,
+        "text_tokens": 1564,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7492
+      },
+      {
+        "query_id": "docvqa:39079",
+        "total_tokens": 6253,
+        "image_tokens": 5184,
+        "text_tokens": 1069,
+        "n_subimages": 81,
+        "k": 5,
+        "visual_share": 0.829
+      },
+      {
+        "query_id": "infographicvqa:90991",
+        "total_tokens": 4755,
+        "image_tokens": 2368,
+        "text_tokens": 2387,
+        "n_subimages": 37,
+        "k": 5,
+        "visual_share": 0.498
+      },
+      {
+        "query_id": "docvqa:57810",
+        "total_tokens": 4683,
+        "image_tokens": 3392,
+        "text_tokens": 1291,
+        "n_subimages": 53,
+        "k": 5,
+        "visual_share": 0.7243
+      },
+      {
+        "query_id": "docvqa:49530",
+        "total_tokens": 5390,
+        "image_tokens": 4416,
+        "text_tokens": 974,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.8193
+      },
+      {
+        "query_id": "infographicvqa:90995",
+        "total_tokens": 5519,
+        "image_tokens": 3648,
+        "text_tokens": 1871,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.661
+      },
+      {
+        "query_id": "docvqa:582",
+        "total_tokens": 5707,
+        "image_tokens": 4160,
+        "text_tokens": 1547,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.7289
+      },
+      {
+        "query_id": "infographicvqa:91114",
+        "total_tokens": 6509,
+        "image_tokens": 4672,
+        "text_tokens": 1837,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7178
+      },
+      {
+        "query_id": "docvqa:57783",
+        "total_tokens": 5842,
+        "image_tokens": 4672,
+        "text_tokens": 1170,
+        "n_subimages": 73,
+        "k": 5,
+        "visual_share": 0.7997
+      },
+      {
+        "query_id": "docvqa:57880",
+        "total_tokens": 5698,
+        "image_tokens": 4416,
+        "text_tokens": 1282,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.775
+      },
+      {
+        "query_id": "infographicvqa:98451",
+        "total_tokens": 6673,
+        "image_tokens": 4416,
+        "text_tokens": 2257,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.6618
+      },
+      {
+        "query_id": "docvqa:57387",
+        "total_tokens": 5867,
+        "image_tokens": 4160,
+        "text_tokens": 1707,
+        "n_subimages": 65,
+        "k": 5,
+        "visual_share": 0.7091
+      },
+      {
+        "query_id": "docvqa:57825",
+        "total_tokens": 5497,
+        "image_tokens": 4416,
+        "text_tokens": 1081,
+        "n_subimages": 69,
+        "k": 5,
+        "visual_share": 0.8033
+      },
+      {
+        "query_id": "infographicvqa:90989",
+        "total_tokens": 5370,
+        "image_tokens": 2624,
+        "text_tokens": 2746,
+        "n_subimages": 41,
+        "k": 5,
+        "visual_share": 0.4886
+      },
+      {
+        "query_id": "docvqa:57431",
+        "total_tokens": 5387,
+        "image_tokens": 3648,
+        "text_tokens": 1739,
+        "n_subimages": 57,
+        "k": 5,
+        "visual_share": 0.6772
+      },
+      {
+        "query_id": "docvqa:49546",
+        "total_tokens": 4852,
+        "image_tokens": 3904,
+        "text_tokens": 948,
+        "n_subimages": 61,
+        "k": 5,
+        "visual_share": 0.8046
+      }
+    ]
+  }
+}

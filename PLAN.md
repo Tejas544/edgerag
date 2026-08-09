@@ -59,7 +59,7 @@ poisons every number downstream.
 
 ---
 
-## Phase 0 — Rails · Aug 9 AM · ~3 hrs
+## Phase 0 — Rails · Aug 9 AM · ✅ **DONE** (commit `9ac2044`)
 
 Nothing model-related. This is scaffolding that everything else is measured by.
 
@@ -74,8 +74,12 @@ Nothing model-related. This is scaffolding that everything else is measured by.
   Wired into tests from day one. The budget is enforced continuously, not audited at the end.
 - `CONTEXT.md`, `BUGS.md`, `PLAN.md` committed.
 
-**Gate:** `pytest -q` green · `python -m bench.bench --dry-run` emits valid JSON + a markdown table
-· `git log` shows commits.
+**Gate: GREEN.** `pytest -q` → 29 passed · `ruff check` clean · `bench.bench --dry-run --md`
+emits valid JSONL + markdown table · device gate verified to *refuse* on the GTX 1650 and to stamp
+`trusted=false` under override · `MemoryBudget` verified to fire against real VRAM · committed.
+
+**Not done — needs your action:** `git remote add origin … && git push`. The repo is local only.
+`00_FOUNDATIONS.md` §6 makes commit history a hiring signal, and it only counts once it's pushed.
 
 ---
 

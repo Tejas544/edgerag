@@ -26,7 +26,82 @@ in December. **Write the entry while the diagnosis is fresh.**
 
 ## Confirmed bugs
 
-*(none yet — Phase 0)*
+### B-01 · OCR text silently empty for every InfographicVQA page · 2026-08-09 · Phase 1
+
+**Symptom:** corpus build completed with exit 0, no exception, no warning — and the summary line
+read `with OCR text: 0 (mean 0 chars)` across all 250 InfographicVQA pages. Every document in the
+corpus was image-only, so hybrid text+image retrieval had nothing to retrieve on.
+
+**Wrong theory:** that InfographicVQA's `ocr` field was empty or absent for the validation split,
+and text would have to come from OCR-ing the images ourselves (a Tesseract dependency and an
+afternoon). The field is 208 KB per row — it was never empty.
+
+**Root cause:** two independent container assumptions, both wrong, and neither one raising.
+
+1. **The field is not JSON.** It is a **Python list repr** — literally starts `['{` and ends
+   `}']` — so `json.loads` fails at character 1. The payload is the single string element inside.
+2. **Blocks are grouped by type, not flat.** Top-level keys are `PAGE`, `LINE`, `WORD`, each with
+   its own list. There is no flat `Blocks` array. The code read `payload["PAGE"]`, which holds
+   exactly one page-geometry block carrying no text.
+
+Either mistake alone yields `""`. The parser caught its own exceptions and degraded to `""` by
+design, so both failures were invisible.
+
+**Diagnosis:** the corpus builder prints a coverage stat (`with OCR text: N`) as part of its
+summary. That line — not an exception, not a test — is what surfaced it. Confirming the shape then
+took one probe script: `repr` the first three characters, try `json.loads`, try
+`ast.literal_eval`, and print `Counter(BlockType)` per container key.
+
+**Fix:** `ast.literal_eval` → unwrap the single-element list → `json.loads` the inner string →
+read `payload["LINE"]`, with a fallback to a flat `Blocks` array. `edgerag/retrieval/corpus.py`.
+
+**Prevention:** two layers, because a silent-empty failure needs more than a unit test.
+- `tests/test_corpus.py` builds a fixture through `str([json.dumps(payload)])` — the *shipped*
+  container, not a convenient one — and asserts LINE text survives, WORD is dropped, and order is
+  preserved.
+- `scripts/build_corpus.py` now **fails the build** if OCR coverage is under 80%. Absence of an
+  exception proves nothing about a function whose failure mode is a valid return value.
+
+**Cost:** ~25 min, and one wasted 5-minute corpus rebuild.
+
+**The transferable lesson:** a parser that swallows exceptions and returns a falsy default cannot
+be validated by "it ran." It needs a *coverage* assertion at the call site. This applies directly
+to the Phase 3 allocator, where `free()` on an already-free block is the same shape of bug —
+plausible state, no exception, wrong answer.
+
+---
+
+## Defused landmines
+
+Found by inspection before they fired. Recorded because "why did you check that?" is a better
+interview answer than "it crashed and I fixed it," and because the mitigation is load-bearing.
+
+### L-01 · `config.pad_token_id` is out of range for the vocabulary · 2026-08-09 · Phase 1
+
+**Found:** probing checkpoint configs before writing the batching code.
+
+**The defect, in the shipped checkpoints:**
+
+| field | SmolVLM2-256M | SmolVLM2-2.2B | valid? |
+|---|---|---|---|
+| `config.pad_token_id` | **128002** | **128002** | ❌ `vocab_size` is 49280 |
+| `config.text_config.pad_token_id` | 2 | 2 | ✅ |
+| `tokenizer.pad_token_id` | 2 (`<\|im_end\|>`) | 2 | ✅ |
+
+128002 is a Llama-3 vocabulary leftover on the *composite* VLM config. `transformers` prints a
+warning and continues.
+
+**Why it is dangerous rather than annoying:** `config.pad_token_id` is the obvious field to read,
+and it is wrong. Padding a batch with token id 128002 is an out-of-bounds index into a
+49280-row embedding table. On CUDA that surfaces as a **device-side assert**, which
+(a) is asynchronous, so the traceback points at an unrelated later line, (b) poisons the CUDA
+context so every subsequent operation in the process fails, and (c) on Windows/Turing gives an
+especially unhelpful message. It would not fire until Phase 5 introduces padded batches, by which
+point the scheduler would be the natural suspect and the config the last place anyone looks.
+
+**Mitigation:** never read `pad_token_id` from the composite config. `ModelSpec` takes it from
+`text_config`, and a test asserts `pad_token_id < vocab_size` for every checkpoint in the tiering.
+Related: `BUGS.md` P-10 and P-11, which are the other two ways padding silently corrupts a batch.
 
 ---
 
