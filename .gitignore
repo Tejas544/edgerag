@@ -1,0 +1,32 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Corpus and model weights are large and reproducible from scripts; results are not.
+data/corpus/
+data/**/*.jpg
+data/**/*.png
+data/**/*.pdf
+*.safetensors
+*.bin
+
+# Keep results/ and plots/ tracked -- benchmark history is part of the deliverable.
+!results/
+!results/**/*.json
+!results/**/*.jsonl
+!results/plots/*.png
+
+# ...except the harness self-test, which is a fake measurement and would only confuse a reader
+# browsing results/.
+results/dry_run.jsonl
+
+.ipynb_checkpoints/
+.env
+
+# Personal planning docs -- not part of the deliverable
+00_FOUNDATIONS.md
+01_EDGERAG.md

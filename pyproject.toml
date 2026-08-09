@@ -1,0 +1,50 @@
+[project]
+name = "edgerag"
+version = "0.1.0"
+description = "On-device multimodal RAG under a fixed memory budget"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "torchvision",
+    "transformers",
+    "pillow",
+    "numpy",
+    "matplotlib",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+serve = ["fastapi", "uvicorn[standard]", "sse-starlette"]
+dev = ["pytest", "pytest-cov", "hypothesis", "ruff", "mypy"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["edgerag*", "bench*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # An untrusted-device warning is expected in most harness tests; unexpected ones should fail.
+    "error::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+# transformers ships incomplete stubs; the boundary is deliberate (CONTEXT.md D2).
+[[tool.mypy.overrides]]
+module = ["transformers.*", "torchvision.*", "matplotlib.*"]
+ignore_missing_imports = true
