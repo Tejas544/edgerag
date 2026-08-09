@@ -174,6 +174,14 @@ Gets worse in Phase 4, where pruning *changes* the count and the expansion logic
 **P-12 · Missing `torch.inference_mode()`.** Autograd graph retained → roughly 2× memory. Under a
 4 GB budget this reads as "the model doesn't fit" rather than "I forgot a decorator."
 
+**P-25 · Budget assembled from weights + KV, blown by transient activations.** ⚠️ *measured, see
+`CONTEXT.md` D12* — the 256M fixture peaks at 2.7 GiB on a k=5 prompt, of which ~2.0 GiB is
+vision-tower activation for 65 sub-images processed in one pass. *Symptom:* the accounting table
+sums under budget and the pipeline OOMs anyway; worse, it OOMs *only* on high-`k` or high-page-count
+requests, so it looks like a data-dependent bug rather than a design one. *Prevention:* the budget
+is defined on `max_memory_allocated` (a peak), not on a sum of resident components, and
+`MemoryBudget` wraps the whole prefill rather than just model construction.
+
 ### Benchmarking — these destroy credibility, not just numbers
 
 **P-13 · No `torch.cuda.synchronize()` → timing kernel launches, not execution.**

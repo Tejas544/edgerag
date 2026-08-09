@@ -64,6 +64,12 @@ class TrialResult:
     n_generated_tokens: int
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    #: ``"per_step"`` -- each entry is a real measurement.
+    #: ``"aggregate"`` -- total decode time divided evenly across steps, because the source could
+    #: not report per-token timing. Inter-token *percentiles* are then meaningless and are
+    #: suppressed rather than reported as if measured.
+    decode_timing: str = "per_step"
+
     @property
     def decode_s(self) -> float:
         return sum(self.decode_step_times_s)
@@ -71,6 +77,38 @@ class TrialResult:
     @property
     def end_to_end_s(self) -> float:
         return self.ttft_s + self.decode_s
+
+    @classmethod
+    def from_aggregate(
+        cls,
+        ttft_s: float,
+        decode_total_s: float,
+        n_prompt_tokens: int,
+        n_generated_tokens: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> TrialResult:
+        """Build a result from aggregate decode time when per-token timing is unavailable.
+
+        Needed for the HuggingFace ``generate()`` baseline. Timestamping each step there requires
+        a ``LogitsProcessor`` hook plus a ``cuda.synchronize()`` **per token**, which measurably
+        slows the very loop being measured -- so the baseline would be handicapped by the act of
+        instrumenting it, and every speedup claimed against it inflated.
+
+        Total decode time is therefore measured once, cleanly, and the per-step list is filled
+        uniformly purely so downstream aggregation has the right shape. ``decode_timing`` marks it
+        so no reader mistakes the flat distribution for a real one.
+        """
+        if n_generated_tokens <= 0:
+            raise ValueError("n_generated_tokens must be positive")
+        per_step = decode_total_s / n_generated_tokens
+        return cls(
+            ttft_s=ttft_s,
+            decode_step_times_s=[per_step] * n_generated_tokens,
+            n_prompt_tokens=n_prompt_tokens,
+            n_generated_tokens=n_generated_tokens,
+            metadata=metadata or {},
+            decode_timing="aggregate",
+        )
 
     def validate(self) -> None:
         if self.ttft_s <= 0:
@@ -80,6 +118,8 @@ class TrialResult:
                 f"reported {self.n_generated_tokens} generated tokens but "
                 f"{len(self.decode_step_times_s)} step times"
             )
+        if self.decode_timing not in ("per_step", "aggregate"):
+            raise ValueError(f"unknown decode_timing {self.decode_timing!r}")
 
 
 @dataclass
@@ -99,6 +139,11 @@ class BenchRecord:
     end_to_end: dict[str, Any]
     memory: dict[str, Any]
     trusted: bool
+    decode_timing: str = "per_step"
+    #: Content hash of the frozen trace this was measured against. Two records with different
+    #: fingerprints describe different workloads -- the one incomparability `check_comparable`
+    #: cannot detect, because their held-constant manifests look identical.
+    workload_fingerprint: str = ""
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,6 +158,7 @@ def run_benchmark(
     warmup: int = DEFAULT_WARMUP,
     trials: int = DEFAULT_TRIALS,
     allow_untrusted_device: bool = False,
+    workload_fingerprint: str = "",
     notes: str = "",
 ) -> BenchRecord:
     """Run ``fn`` under the full measurement protocol and return a record.
@@ -138,6 +184,7 @@ def run_benchmark(
     all_step_times: list[float] = []
     e2es: list[float] = []
     throughputs: list[float] = []
+    decode_timings: set[str] = set()
 
     with MemoryProbe() as probe:
         for _ in range(trials):
@@ -146,6 +193,7 @@ def run_benchmark(
             sync()
             result.validate()
 
+            decode_timings.add(result.decode_timing)
             ttfts.append(result.ttft_s)
             all_step_times.extend(result.decode_step_times_s)
             e2es.append(result.end_to_end_s)
@@ -153,6 +201,11 @@ def run_benchmark(
                 throughputs.append(result.n_generated_tokens / result.decode_s)
 
     memory: MemorySample = probe.require()
+    if len(decode_timings) > 1:
+        raise ValueError(
+            f"trials mixed decode timing modes {sorted(decode_timings)}; pooling real per-step "
+            "latencies with uniformly-filled ones would produce a distribution that is neither"
+        )
 
     return BenchRecord(
         run_id=uuid.uuid4().hex[:12],
@@ -168,6 +221,8 @@ def run_benchmark(
         end_to_end=Percentiles.of(e2es).to_dict(),
         memory=memory.to_dict(),
         trusted=device.trusted,
+        decode_timing=decode_timings.pop() if decode_timings else "per_step",
+        workload_fingerprint=workload_fingerprint,
         notes=notes,
     )
 
@@ -210,6 +265,18 @@ def check_comparable(records: Sequence[dict[str, Any]], ignore: Sequence[str] = 
     """
     if len(records) < 2:
         return
+
+    # The workload itself must match, and this check cannot be expressed as a held-constant
+    # field: two runs against different traces have identical manifests (same model, dtype,
+    # batch, lengths) and are still incomparable.
+    fingerprints = {r.get("workload_fingerprint", "") for r in records}
+    if len(fingerprints) > 1:
+        raise IncomparableRecordsError(
+            f"records span {len(fingerprints)} different workload traces "
+            f"({sorted(fingerprints)}). Re-run the older results against the current trace, or "
+            "table them separately."
+        )
+
     ignore_set = set(ignore)
     base = records[0]["held_constant"]
     for rec in records[1:]:
@@ -267,6 +334,15 @@ def records_to_markdown(
             "**Untrusted-device rows are not publishable.** Measured on hardware that is not the "
             "reference T4; see `CONTEXT.md` D4."
         )
+    if any(r.get("decode_timing") == "aggregate" for r in records):
+        footnotes.append(
+            "Some rows report *aggregate* decode timing: total decode time measured once and "
+            "divided evenly across tokens, because the source cannot report per-token timings "
+            "without a per-step sync that would slow the loop being measured. Throughput is real; "
+            "inter-token latency percentiles for those rows are not and are omitted."
+        )
+    if records[0].get("workload_fingerprint"):
+        footnotes.append(f"Workload trace: `{records[0]['workload_fingerprint']}`.")
     return "\n".join(lines + footnotes) + "\n"
 
 

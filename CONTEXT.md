@@ -363,6 +363,66 @@ with ~8× cheaper tokens.
 
 ---
 
+## D12 · The vision tower's activation peak is a budget line item · **ACCEPTED** · 2026-08-10
+
+**Found by:** smoke-testing the Colab runner locally on the 256M fixture before spending scarce
+free-tier T4 quota. The run was not intended to produce a finding; the peak-memory number did.
+
+**Measurement (256M fixture, k=5, batch 1, GTX 1650):** peak allocated **2.696 GiB**.
+
+That number does not decompose the way the plan assumed:
+
+| component | size |
+|---|---|
+| model weights | 0.49 GiB |
+| KV cache (5,683 tokens × 22.5 KiB) | 0.12 GiB |
+| pixel values (65 sub-images) | 0.10 GiB |
+| **unaccounted — vision tower activations** | **~2.0 GiB** |
+
+A k=5 document-RAG prompt splits into ~65 sub-images, and the tower processes **all of them in one
+forward pass**. The transient activation peak dominates everything else — on the *smallest* model
+in the tiering, where weights and KV are both trivial.
+
+**Why this matters more than it looks:** `01_EDGERAG.md` §11 asks for a memory table summing
+weights + KV + vision + embeddings + index under 4 GB. That framing treats the vision encoder as a
+*weights* cost. It is not. On this workload it is an **activation** cost, it is transient, and it
+sets the peak — and peak is what `max_memory_allocated` measures and what the budget is defined
+against (D3/P3). A budget assembled from weights and KV alone would balance on paper and OOM in
+practice.
+
+Extrapolating to the 2.2B headline model: 65 sub-images × 729 patches = ~47k tokens through a
+27-layer, 1152-wide tower in one pass. The MLP intermediate alone is ~437 MiB transient per layer
+boundary. Against a 4 GiB budget already holding ~1.1 GiB of INT4 weights and ~1.27 GiB of KV,
+**the vision tower is a plausible cause of the budget failing** — a risk not on the original list.
+
+**Decision: chunk the vision tower forward.** Process sub-images in groups (start at 8) rather
+than all 65 at once, bounding peak activation at the cost of some GPU parallelism during prefill.
+
+**Rejected:**
+- *Leave it unchunked and buy headroom elsewhere* — cedes 2 GiB of a 4 GiB budget to a transient,
+  and the peak scales with `k`, so any increase in retrieval depth reopens it.
+- *Gradient checkpointing on the tower* — solves a training problem. There is no backward pass
+  here; there is nothing to trade compute against.
+- *Downscale images* — directly attacks the visual-token share the Phase 1 gate just confirmed at
+  75.4%, and would weaken the Phase 4 result to fix a memory problem that chunking solves for free.
+
+**Why it is free:** each sub-image passes through the ViT independently — there is no
+cross-sub-image attention in the tower. Chunking is therefore *exactly* equivalent, not an
+approximation, and the equivalence is testable (identical embeddings, any chunk size).
+
+**Implementation:** Phase 2, alongside the forward pass. Chunk size becomes a config knob and gets
+a memory-vs-prefill-latency sweep in Phase 8.
+
+**Interview value:** the KV cache gets all the attention in this problem space. "On a
+document-RAG workload the vision encoder's transient activation peak was competitive with the KV
+cache, so I chunked the tower forward and measured the tradeoff" is a specific, non-obvious
+finding that comes only from having measured early.
+
+**Revisit if:** measured chunking cost in prefill latency exceeds ~15%, at which point the chunk
+size needs tuning rather than the default.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
@@ -371,3 +431,4 @@ with ~8× cheaper tokens.
 | P2 | Equivalence tolerance: what `atol/rtol` and why. fp16 softmax accumulation drift grows with sequence length — a tolerance chosen at seq 32 will fail at seq 2048. Likely: upcast softmax to fp32, set tolerance per-length. | Phase 2 |
 | P3 | Memory-budget definition: does the 4 GB include the ~300–600 MB CUDA context? **Recommend: exclude it, state it explicitly, and report it as a separate line.** Silently excluding it is the kind of thing that unravels an otherwise good conversation. | Phase 8 |
 | P4 | Quality metric for the pruning sweep: ANLS vs exact-match vs LLM-judge. Leaning **ANLS** (standard for DocVQA, no extra model resident). | Phase 4 |
+| P5 | **Batched VLM requests pad the sub-image dimension to the batch maximum.** Measured 2026-08-10: batching a 57-sub-image request with a 61 one yields `pixel_values (2, 61, ...)` — four phantom images pushed through 12–27 tower layers for nothing. Document pages vary widely in aspect ratio, so this waste is the norm, not an edge case. Options: (a) group requests by sub-image count in the scheduler, (b) run the tower **per request, unbatched**, and batch only the decoder — attractive because the tower is prefill-only and D12 already chunks it. Leaning (b). | Phase 5 |

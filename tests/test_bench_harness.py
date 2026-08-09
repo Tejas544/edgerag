@@ -204,3 +204,85 @@ def test_markdown_table_flags_untrusted_and_unreliable_p99() -> None:
 
 def test_markdown_handles_no_records() -> None:
     assert "no records" in records_to_markdown([])
+
+
+# --- workload provenance --------------------------------------------------------------------
+
+
+def test_records_from_different_traces_are_incomparable() -> None:
+    """The one incomparability a held-constant manifest cannot express.
+
+    Two runs against different workloads report the same model, dtype, batch, and lengths. Only
+    the trace fingerprint distinguishes them.
+    """
+    a = {**_rec_dict("a"), "workload_fingerprint": "aaaa1111"}
+    b = {**_rec_dict("b"), "workload_fingerprint": "bbbb2222"}
+    with pytest.raises(IncomparableRecordsError, match="different workload traces"):
+        check_comparable([a, b])
+
+
+def test_records_from_the_same_trace_are_comparable() -> None:
+    a = {**_rec_dict("a"), "workload_fingerprint": "aaaa1111"}
+    b = {**_rec_dict("b"), "workload_fingerprint": "aaaa1111"}
+    check_comparable([a, b])
+
+
+def test_fingerprint_is_stamped_onto_the_record() -> None:
+    with pytest.warns(UserWarning):
+        rec = run_benchmark(
+            "dry",
+            _fn(),
+            _held(),
+            warmup=1,
+            trials=5,
+            allow_untrusted_device=True,
+            workload_fingerprint="94b148a0b9f5006e",
+        )
+    assert rec.workload_fingerprint == "94b148a0b9f5006e"
+    assert "94b148a0b9f5006e" in records_to_markdown([rec.to_dict()])
+
+
+# --- aggregate decode timing ------------------------------------------------------------------
+
+
+def test_from_aggregate_spreads_decode_time_evenly() -> None:
+    result = TrialResult.from_aggregate(
+        ttft_s=0.5, decode_total_s=2.0, n_prompt_tokens=100, n_generated_tokens=8
+    )
+    result.validate()
+    assert result.decode_timing == "aggregate"
+    assert result.decode_step_times_s == [0.25] * 8
+    assert result.decode_s == pytest.approx(2.0)
+    assert result.end_to_end_s == pytest.approx(2.5)
+
+
+def test_from_aggregate_rejects_zero_tokens() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        TrialResult.from_aggregate(0.5, 2.0, 100, 0)
+
+
+def test_aggregate_timing_is_flagged_in_the_markdown() -> None:
+    """A flat per-step distribution must not be mistaken for a measured one."""
+    fn = lambda: TrialResult.from_aggregate(0.01, 0.08, 512, 8)  # noqa: E731
+    with pytest.warns(UserWarning):
+        rec = run_benchmark("agg", fn, _held(), warmup=1, trials=5, allow_untrusted_device=True)
+    assert rec.decode_timing == "aggregate"
+
+    md = records_to_markdown([rec.to_dict()])
+    assert "aggregate" in md
+    assert "inter-token latency percentiles for those rows are not" in md
+
+
+def test_mixing_timing_modes_within_one_record_is_rejected() -> None:
+    """Pooling real per-step latencies with uniformly-filled ones yields a distribution that
+    describes neither."""
+    calls = {"n": 0}
+
+    def alternating() -> TrialResult:
+        calls["n"] += 1
+        if calls["n"] % 2:
+            return TrialResult.from_aggregate(0.01, 0.08, 512, 8)
+        return _fake_generation(new_tokens=8, rng=random.Random(0))
+
+    with pytest.warns(UserWarning), pytest.raises(ValueError, match="mixed decode timing"):
+        run_benchmark("mix", alternating, _held(), warmup=0, trials=5, allow_untrusted_device=True)
