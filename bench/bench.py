@@ -301,29 +301,41 @@ def records_to_markdown(
     check_comparable(records, ignore=ignore)
 
     header = (
-        "| run | TTFT p50 (ms) | TTFT p99 (ms) | decode (tok/s) | "
-        "e2e p50 (ms) | peak alloc (GiB) | trusted |"
+        "| run | batch | TTFT p50 (ms) | TTFT p99 (ms) | tok/s per seq | tok/s aggregate | "
+        "peak alloc (GiB) | trusted |"
     )
-    sep = "|---|---:|---:|---:|---:|---:|:--:|"
+    sep = "|---|---:|---:|---:|---:|---:|---:|:--:|"
     lines = [header, sep]
     for rec in records:
         p99_flag = "" if rec["ttft"]["p99_is_reliable"] else "*"
+        batch = int(rec["held_constant"].get("batch_size", 1))
+        per_seq = rec["decode_tokens_per_s"]["p50"]
         lines.append(
-            "| {name} | {t50:.1f} | {t99:.1f}{flag} | {tps:.1f} ± {tps_sd:.1f} | "
-            "{e50:.1f} | {mem:.3f} | {tr} |".format(
+            "| {name} | {batch} | {t50:.0f} | {t99:.0f}{flag} | {tps:.1f} ± {tps_sd:.1f} | "
+            "{agg:.1f} | {mem:.2f} | {tr} |".format(
                 name=rec["name"],
+                batch=batch,
                 t50=rec["ttft"]["p50"] * 1e3,
                 t99=rec["ttft"]["p99"] * 1e3,
                 flag=p99_flag,
-                tps=rec["decode_tokens_per_s"]["p50"],
+                tps=per_seq,
                 tps_sd=rec["decode_tokens_per_s"]["std"],
-                e50=rec["end_to_end"]["p50"] * 1e3,
+                # Derived, not stored -- existing records stay valid and comparable.
+                agg=per_seq * batch,
                 mem=rec["memory"]["peak_allocated_gib"],
                 tr="yes" if rec["trusted"] else "**NO**",
             )
         )
 
-    footnotes = ["", f"Device: `{records[0]['device']['name']}`.", ""]
+    footnotes = [
+        "",
+        f"Device: `{records[0]['device']['name']}`.",
+        "",
+        "**tok/s per seq** is what one request experiences; **tok/s aggregate** "
+        "(`per seq x batch`) is what the server delivers. Batching trades the first for the "
+        "second, and reporting only the per-sequence figure makes batching look like a "
+        "regression.",
+    ]
     if any(not r["ttft"]["p99_is_reliable"] for r in records):
         footnotes.append(
             "`*` p99 computed from fewer than 100 samples -- it is effectively the max, "

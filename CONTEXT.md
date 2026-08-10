@@ -462,11 +462,74 @@ in fp32* is a materially stronger answer than *within tolerance*.
 
 ---
 
+## D14 · What the T4 baseline says · **MEASURED** · 2026-08-10
+
+Tesla T4 (14.6 GiB), SmolVLM2-2.2B (4.18 GiB fp16, 2,246,784,880 params), frozen trace
+`94b148a0b9f5006e`, HF `generate()` with `use_cache=True`.
+
+| batch | TTFT p50 | tok/s per seq | **tok/s aggregate** | peak alloc |
+|---|---|---|---|---|
+| 1 | 3,730 ms | 26.0 | 26.0 | 5.76 GiB |
+| 2 | 11,071 ms | 15.9 | 31.8 | 7.90 GiB |
+| 4 | 25,006 ms | 8.6 | 34.4 | 12.41 GiB |
+
+### Finding 1 — the baseline does not fit the target budget for even one request
+
+**5.76 GiB for a single k=5 RAG query, against a 4 GiB ceiling.** The naive fp16 pipeline is over
+budget at batch 1, before any concurrency. This is a better statement of the problem than
+"reduce memory 4×": the starting point is not a working system that is merely inefficient, it is a
+system that *does not run* on the target device.
+
+The D11 prediction was 5.7 GiB and the measurement is 5.76. The arithmetic in
+`edgerag/core/spec.py` holds at scale.
+
+### Finding 2 — batching barely helps, and MHA is why
+
+Aggregate throughput goes 26.0 → 31.8 → 34.4: **1.32× for 4× the batch.** For a GQA model this
+would be near-linear.
+
+The cause is D10: the 2.2B checkpoint is MHA, so every sequence carries 192 KiB of KV per token.
+Decode is bandwidth-bound on KV reads, and batch *b* reads *b* times as much. Adding sequences adds
+proportional bandwidth demand, so throughput saturates almost immediately.
+
+**This changes the Phase 5 expectation and should be said before anyone asks.** `01_EDGERAG.md` §6
+targets 5–11× decode throughput from continuous batching. On this model that ceiling is set by KV
+bandwidth, not by scheduling, and no scheduler recovers it. **The lever that does work is cutting
+KV bytes** — visual-token pruning (Phase 4) and INT4 (Phase 6) attack the actual bottleneck;
+batching does not. Reinforces D11.
+
+### Finding 3 — activation cost per sequence grows with batch, confirming D12
+
+Subtracting weights and predicted KV:
+
+| batch | non-weight, non-KV | per sequence |
+|---|---|---|
+| 1 | 0.31 GiB | 0.31 |
+| 2 | 1.18 GiB | 0.59 |
+| 4 | 3.16 GiB | 0.79 |
+
+Per-sequence activation *rises* with batch because left-padding pads every request to the batch
+maximum, and the vision tower's sub-image count follows. D12's chunking addresses the tower half;
+the padding half is a scheduling concern for Phase 5 (group by similar length).
+
+### Finding 4 — TTFT degrades superlinearly
+
+3,730 → 11,071 → 25,006 ms is 1× → 2.97× → **6.7×** for 1× → 2× → 4× batch. Same padding cause.
+A 3.7-second TTFT at batch 1 is already a poor experience; 25 seconds at batch 4 is unusable. This
+is the number chunked prefill (Phase 5) has to fix, and it makes the p99-TTFT-vs-throughput plot
+the honest centrepiece `01_EDGERAG.md` §5 asks for.
+
+**Harness change made in response:** the markdown table now reports per-sequence *and* aggregate
+tok/s. Reporting only per-sequence makes batching look like a regression, which is a self-inflicted
+wound in an interview.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
 |---|---|---|
-| P1 | Preemption policy: recompute vs swap vs reject. Leaning **recompute-on-evict** (no CPU↔GPU transfer, simplest correctness story, and prefill is compute-bound so recompute is cheap on a T4 with spare FLOPs). | Phase 3d |
+| P1 | Preemption policy: recompute vs swap vs reject. Leaning **recompute-on-evict** (no CPU↔GPU transfer, simplest correctness story). **Amended 2026-08-10 — D14 removes one of the reasons.** "Prefill is compute-bound so recompute is cheap" assumed spare FLOPs; the measured TTFT is **3.7 s at batch 1 and 25 s at batch 4**, so recomputing a preempted sequence is *seconds*, not microseconds, and would wreck p99. Swap-to-host now looks better than it did: 1.27 GiB over PCIe is ~100 ms, an order of magnitude cheaper than recompute. Decide with a measurement, not the vLLM-paper default. **Second constraint, found in Phase 3a:** copy-on-write itself can raise `OutOfBlocksError` — writing to a shared block needs a free block at the moment the pool is fullest. Admission control must reserve CoW headroom, or the system deadlocks exactly when prefix sharing is helping most. | Phase 3d |
 | P2 | Equivalence tolerance: what `atol/rtol` and why. fp16 softmax accumulation drift grows with sequence length — a tolerance chosen at seq 32 will fail at seq 2048. Likely: upcast softmax to fp32, set tolerance per-length. | Phase 2 |
 | P3 | Memory-budget definition: does the 4 GB include the ~300–600 MB CUDA context? **Recommend: exclude it, state it explicitly, and report it as a separate line.** Silently excluding it is the kind of thing that unravels an otherwise good conversation. | Phase 8 |
 | P4 | Quality metric for the pruning sweep: ANLS vs exact-match vs LLM-judge. Leaning **ANLS** (standard for DocVQA, no extra model resident). | Phase 4 |
