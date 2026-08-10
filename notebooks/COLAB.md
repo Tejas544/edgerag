@@ -99,6 +99,81 @@ denominator for every claim in the README.
 
 ---
 
+---
+
+# Session 2 — Phase 4 quality, refined OOM probe, gather overhead
+
+Cells 1–4 above are identical (check the GPU, mount Drive, clone, rebuild corpus). **The trace
+fingerprint must still read `94b148a0b9f5006e`** — if it does not, the workload changed and
+nothing here is comparable to session 1.
+
+Then run these three. Budget ~35 min total; the ordering puts the cheapest and most valuable
+first, so a disconnect costs the least.
+
+### Cell 5a — gather overhead (~2 min, no weights)
+
+```python
+!python -m scripts.colab_gather_overhead --drive /content/drive/MyDrive/edgerag
+```
+
+Loads **no model weights** — gather cost depends on tensor shape and layout, not values — so this
+is a two-minute cell rather than a 9 GB download. Run it first.
+
+It answers `CONTEXT.md` D3's promise: *"measure the gather overhead as a fraction of decode time
+and publish it."* Without this number, "why didn't you write a fused kernel?" is answered with a
+shrug.
+
+**Watch the final line.** Local (untrusted) numbers put gather near 60% of the paged attention
+path, well above D3's 25% revisit threshold. If the T4 agrees, `CONTEXT.md` P6 is the cheap fix
+(one pool-layout change removes a redundant copy) and a fused kernel is the expensive one.
+
+### Cell 5b — refined OOM probe (~8 min)
+
+```python
+!python -m scripts.colab_baseline --drive /content/drive/MyDrive/edgerag --only oom_probe
+```
+
+`--only` re-measures just that cell and suppresses the rest, so this does not repeat session 1's
+baseline. It is needed because the original probe only doubled (1, 2, 4, 8) and so proved
+*"at least 4, fewer than 8"*, not 4. Publishing 4 as the denominator would inflate any later
+"N× more concurrent sequences" claim by up to 75%. The probe now walks the gap linearly.
+
+Expect `max_ok` between 4 and 7, and `"refined": true`.
+
+### Cell 5c — Phase 4 quality curve (~25 min, needs the 2.2B)
+
+```python
+!python -m scripts.colab_pruning_quality --drive /content/drive/MyDrive/edgerag --n-queries 60
+```
+
+The half of Phase 4 that cannot be computed locally. `scripts/measure_pruning_memory.py` already
+gives MiB reclaimed exactly; **publishing that without this would be the flattering half.**
+
+Scores held-out questions with ANLS at each keep ratio, for both the attention-based selector and
+a uniform-stride control. Two things to read:
+
+- **Where the curve falls off.** The plan targets 50–75% of visual tokens removed at ≥95% quality
+  retention. `keep=0.5` reclaims 443 MiB; whether it holds quality is exactly what this measures.
+- **Whether `attention` beats `uniform` at the same ratio.** If it does not, the honest finding is
+  *"visual tokens are redundant on this workload"*, not *"FastV works"* — a real result either
+  way, but a different one.
+
+The `keep=1.0` row is proven bit-identical to running no compressor at all (`atol=0, rtol=0` in
+`tests/test_fastv.py`), so it is the true baseline rather than a near-miss.
+
+### Cell 6 — bring it all home
+
+```python
+%cd /content/edgerag
+!mkdir -p results
+!cp /content/drive/MyDrive/edgerag/*.json /content/drive/MyDrive/edgerag/*.jsonl results/
+!ls -la results/
+```
+
+Then commit `results/` and tell me — I will fold the numbers into `CONTEXT.md` and the README.
+
+---
+
 ## What to expect, and what would be surprising
 
 From `CONTEXT.md` D11, one k=5 request costs **1,267 MiB** of KV cache and the 2.2B weights are

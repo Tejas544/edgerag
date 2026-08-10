@@ -8,7 +8,7 @@
     {
       "batch": 2,
       "ok": true,
-      "peak_gib": 7.903
+      "peak_gib": 7.904
     },
     {
       "batch": 4,
@@ -18,10 +18,15 @@
     {
       "batch": 8,
       "ok": false
+    },
+    {
+      "batch": 5,
+      "ok": false
     }
   ],
   "max_ok": 4,
-  "oom_at": 8,
+  "oom_at": 5,
+  "refined": true,
   "device": "Tesla T4",
   "workload_fingerprint": "94b148a0b9f5006e"
 }

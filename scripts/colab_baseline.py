@@ -49,6 +49,15 @@ from edgerag.retrieval.trace import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_NEW_TOKENS = 64
 
+#: Every cell this script can produce. Used by ``--only`` to decide what to suppress.
+_ALL_CELLS = (
+    "hf_generate_b1",
+    "hf_generate_b2",
+    "hf_generate_b4",
+    "hf_generate_nocache_b1",
+    "oom_probe",
+)
+
 
 @dataclass
 class Checkpoint:
@@ -63,6 +72,21 @@ class Checkpoint:
             return set(json.loads(self.path.read_text(encoding="utf-8"))["completed"])
         except (json.JSONDecodeError, KeyError, OSError):
             return set()
+
+    def clear(self, cells: list[str]) -> None:
+        """Forget specific cells so they re-run.
+
+        Needed because resumability and re-measurement pull in opposite directions: the manifest
+        exists so a disconnect does not repeat work, which also means a *fixed* measurement would
+        be skipped forever. Clearing is explicit rather than automatic -- silently re-running
+        completed cells would make a resumed session cost full price.
+        """
+        remaining = self.completed() - set(cells)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w", encoding="utf-8") as fh:
+            json.dump({"completed": sorted(remaining)}, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def mark(self, cell: str) -> None:
         done = self.completed() | {cell}
@@ -263,6 +287,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batches", type=int, nargs="+", default=[1, 2, 4])
     parser.add_argument("--skip-oom-probe", action="store_true")
     parser.add_argument(
+        "--rerun",
+        nargs="+",
+        default=[],
+        metavar="CELL",
+        help=(
+            "cells to re-measure even though the manifest marks them done, e.g. "
+            "--rerun oom_probe. Use after fixing a measurement."
+        ),
+    )
+    parser.add_argument(
+        "--only",
+        nargs="+",
+        default=[],
+        metavar="CELL",
+        help="run ONLY these cells (implies --rerun for them). Saves GPU quota.",
+    )
+    parser.add_argument(
         "--allow-untrusted-device",
         action="store_true",
         help="record on non-T4 hardware; results stamped trusted=false and NOT publishable",
@@ -281,9 +322,19 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = JsonlWriter(out_dir / "baseline.jsonl")
     checkpoint = Checkpoint(out_dir / "baseline_manifest.json")
+
+    rerun = list(args.rerun) + list(args.only)
+    if rerun:
+        checkpoint.clear(rerun)
+        print(f"re-measuring: {sorted(set(rerun))}")
+
     done = checkpoint.completed()
+    if args.only:
+        # Everything not named is treated as already done, so it is skipped.
+        wanted = set(args.only)
+        done = done | {c for c in _ALL_CELLS if c not in wanted}
     if done:
-        print(f"resuming -- already complete: {sorted(done)}")
+        print(f"skipping (already complete): {sorted(done)}")
 
     # --- CPU-side setup, before any GPU quota is spent ---
     corpus = load_corpus()
