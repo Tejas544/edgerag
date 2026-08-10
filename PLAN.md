@@ -167,9 +167,23 @@ in `CONTEXT.md` so the "why that one" answer is on record.
 seq_len ∈ {1, 15, 16, 17, 31, 32, 33, 127, 128, 129} × block_size ∈ {8, 16, 32}, with and without
 prefix sharing. The boundary cases are the whole point of that sweep.
 
-**Metrics:** max concurrent seqs before OOM (vs naive) · bytes saved by prefix sharing at k=20 ·
+**Metrics:** max concurrent seqs before OOM (vs naive) · bytes saved by prefix sharing ·
 fragmentation % · **gather overhead as a fraction of decode time** (this is what lets you answer
 "why didn't you write a fused kernel?" with a number instead of a shrug).
+
+> **Measured, and it revises this phase's goal — see `CONTEXT.md` D15.**
+> - Internal fragmentation is **0.0–0.5%** for every block size 1–64, because requests are ~6,625
+>   tokens. Block size is free; **16 chosen**. The Phase 3 plan to sweep it for fragmentation is
+>   dropped as answered.
+> - **The 4–8× concurrency target is unreachable on this workload** (measured: 1 → 2 sequences).
+>   RAG requests already sit at 81% of max context, so right-sizing can recover at most 1.24×, and
+>   HF's `DynamicCache` — the real baseline — never over-reserved anyway. **Do not put a
+>   concurrency multiple in the README.** Lead instead with prefix sharing, the removal of
+>   per-token cache reallocation, and block-granularity admission (which is what makes Phase 5
+>   possible at all).
+> - **Canonical document ordering raises the prefix-sharing win 8.3% → 14.8%.** Deferred to
+>   Phase 4, where quality can be priced; it changes prompt assembly and would invalidate the
+>   frozen trace.
 
 ---
 

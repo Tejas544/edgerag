@@ -1,0 +1,196 @@
+{
+  "model": "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+  "kv_bytes_per_token": 196608,
+  "median_request_tokens": 6625,
+  "kv_budget_gib": 2.5,
+  "block_size_sweep": [
+    {
+      "relevance": {
+        "block_size": 1,
+        "canonical_order": false,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 4318250,
+        "paged_gib": 790.6951904296875,
+        "shared_blocks": 3957676,
+        "shared_gib": 724.672119140625,
+        "sharing_saving_pct": 8.350002894691134,
+        "internal_frag_pct": 0.0,
+        "mean_shared_prefix_docs": 2.643076923076923
+      },
+      "canonical": {
+        "block_size": 1,
+        "canonical_order": true,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 4318250,
+        "paged_gib": 790.6951904296875,
+        "shared_blocks": 3678895,
+        "shared_gib": 673.6257934570312,
+        "sharing_saving_pct": 14.805882012389283,
+        "internal_frag_pct": 0.0,
+        "mean_shared_prefix_docs": 1.2646153846153847
+      }
+    },
+    {
+      "relevance": {
+        "block_size": 4,
+        "canonical_order": false,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 1079815,
+        "paged_gib": 790.880126953125,
+        "shared_blocks": 989740,
+        "shared_gib": 724.9072265625,
+        "sharing_saving_pct": 8.34170668123706,
+        "internal_frag_pct": 0.023383635159726433,
+        "mean_shared_prefix_docs": 2.643076923076923
+      },
+      "canonical": {
+        "block_size": 4,
+        "canonical_order": true,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 1079815,
+        "paged_gib": 790.880126953125,
+        "shared_blocks": 920046,
+        "shared_gib": 673.86181640625,
+        "sharing_saving_pct": 14.795960419145871,
+        "internal_frag_pct": 0.023383635159726433,
+        "mean_shared_prefix_docs": 1.2646153846153847
+      }
+    },
+    {
+      "relevance": {
+        "block_size": 8,
+        "canonical_order": false,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 540069,
+        "paged_gib": 791.11669921875,
+        "shared_blocks": 495063,
+        "shared_gib": 725.18994140625,
+        "sharing_saving_pct": 8.333379623714743,
+        "internal_frag_pct": 0.05328022900777493,
+        "mean_shared_prefix_docs": 2.643076923076923
+      },
+      "canonical": {
+        "block_size": 8,
+        "canonical_order": true,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 540069,
+        "paged_gib": 791.11669921875,
+        "shared_blocks": 460224,
+        "shared_gib": 674.15625,
+        "sharing_saving_pct": 14.78422201607572,
+        "internal_frag_pct": 0.05328022900777493,
+        "mean_shared_prefix_docs": 1.2646153846153847
+      }
+    },
+    {
+      "relevance": {
+        "block_size": 16,
+        "canonical_order": false,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 270191,
+        "paged_gib": 791.5751953125,
+        "shared_blocks": 247739,
+        "shared_gib": 725.7978515625,
+        "sharing_saving_pct": 8.309677228331068,
+        "internal_frag_pct": 0.11117135655887872,
+        "mean_shared_prefix_docs": 2.643076923076923
+      },
+      "canonical": {
+        "block_size": 16,
+        "canonical_order": true,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 270191,
+        "paged_gib": 791.5751953125,
+        "shared_blocks": 230332,
+        "shared_gib": 674.80078125,
+        "sharing_saving_pct": 14.752156807591666,
+        "internal_frag_pct": 0.11117135655887872,
+        "mean_shared_prefix_docs": 1.2646153846153847
+      }
+    },
+    {
+      "relevance": {
+        "block_size": 32,
+        "canonical_order": false,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 135258,
+        "paged_gib": 792.52734375,
+        "shared_blocks": 124052,
+        "shared_gib": 726.8671875,
+        "sharing_saving_pct": 8.284907362226267,
+        "internal_frag_pct": 0.23117856245101953,
+        "mean_shared_prefix_docs": 2.643076923076923
+      },
+      "canonical": {
+        "block_size": 32,
+        "canonical_order": true,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 135258,
+        "paged_gib": 792.52734375,
+        "shared_blocks": 115347,
+        "shared_gib": 675.861328125,
+        "sharing_saving_pct": 14.720755888745952,
+        "internal_frag_pct": 0.23117856245101953,
+        "mean_shared_prefix_docs": 1.2646153846153847
+      }
+    },
+    {
+      "relevance": {
+        "block_size": 64,
+        "canonical_order": false,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 67778,
+        "paged_gib": 794.2734375,
+        "shared_blocks": 62231,
+        "shared_gib": 729.26953125,
+        "sharing_saving_pct": 8.184071527634341,
+        "internal_frag_pct": 0.45050569506329485,
+        "mean_shared_prefix_docs": 2.643076923076923
+      },
+      "canonical": {
+        "block_size": 64,
+        "canonical_order": true,
+        "n_sequences": 650,
+        "total_tokens": 4318250,
+        "paged_blocks": 67778,
+        "paged_gib": 794.2734375,
+        "shared_blocks": 57887,
+        "shared_gib": 678.36328125,
+        "sharing_saving_pct": 14.59323084186609,
+        "internal_frag_pct": 0.45050569506329485,
+        "mean_shared_prefix_docs": 1.2646153846153847
+      }
+    }
+  ],
+  "concurrency": {
+    "8": {
+      "naive_per_seq_gib": 1.5,
+      "paged_per_seq_gib": 1.21435546875,
+      "naive_max_seqs": 1,
+      "paged_max_seqs": 2
+    },
+    "16": {
+      "naive_per_seq_gib": 1.5,
+      "paged_per_seq_gib": 1.2158203125,
+      "naive_max_seqs": 1,
+      "paged_max_seqs": 2
+    },
+    "32": {
+      "naive_per_seq_gib": 1.5,
+      "paged_per_seq_gib": 1.21875,
+      "naive_max_seqs": 1,
+      "paged_max_seqs": 2
+    }
+  }
+}

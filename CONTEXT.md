@@ -361,6 +361,13 @@ and internal fragmentation is expensive. This argues for **smaller** blocks than
 Decide with a measured sweep, not by analogy to vLLM's defaults, which were tuned on GQA models
 with ~8× cheaper tokens.
 
+> **CORRECTED 2026-08-10 — the reasoning above is wrong, see D15.** "One wasted block is 3 MiB" is
+> true in absolute terms and irrelevant in relative ones. Requests on this workload are ~6,625
+> tokens, so a wasted 64-token block is **0.95%** of one sequence. Measured internal fragmentation
+> across the whole trace is **0.0%–0.5%** for every block size from 1 to 64. Block size is
+> effectively free to choose here, and the argument for small blocks evaporates. I reasoned from
+> the absolute size of a block without dividing by the size of a request.
+
 ---
 
 ## D12 · The vision tower's activation peak is a budget line item · **ACCEPTED** · 2026-08-10
@@ -561,6 +568,72 @@ not, which is precisely the regime Phase 3 targets.
 **Harness change made in response:** the markdown table now reports per-sequence *and* aggregate
 tok/s. Reporting only per-sequence makes batching look like a regression, which is a self-inflicted
 wound in an interview.
+
+---
+
+## D15 · Where paging actually wins on this workload — and where it does not · **MEASURED** · 2026-08-10
+
+Exact allocator arithmetic over all 650 trace requests, with per-document token costs measured by
+the real processor (median **1,418** tokens/page, range 651–2,191; median request **6,625**
+tokens). Memory only, so it runs on the local tier under D4.
+
+| block size | paged | internal frag | + prefix sharing | saving | + canonical order | saving |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 790.70 GiB | 0.0% | 724.67 | 8.4% | **673.63** | **14.8%** |
+| 16 | 791.58 GiB | 0.1% | 725.80 | 8.3% | **674.80** | **14.8%** |
+| 64 | 794.27 GiB | 0.5% | 729.27 | 8.2% | **678.36** | **14.6%** |
+
+### Finding 1 — block size does not matter here, and I argued otherwise
+
+Internal fragmentation is **0.0%–0.5% across the entire range 1–64**. At ~6,625 tokens per
+request, even a 64-token block wastes under 1%. D11's claim that fragmentation argues for small
+blocks was wrong: it reasoned from a block's *absolute* size (3 MiB) without dividing by a
+request's size (1.21 GiB). **Decision: block_size = 16.** Not because it is optimal — nothing is —
+but because fragmentation is free and 16 minimises block-table length.
+
+### Finding 2 — the 4–8× concurrency target is not reachable on this workload
+
+`01_EDGERAG.md` §6 targets **4–8×** max concurrent sequences from paging. Measured, within a
+2.5 GiB KV budget: **naive 1 sequence → paged 2**.
+
+The reason is structural, not fixable. Paging's headline win is not over-reserving: a static cache
+reserves `max_position_embeddings` (8,192 tokens = 1.50 GiB) per sequence while paged reserves
+`ceil(6625/16)*16` (= 1.22 GiB). But **RAG requests already sit at 81% of the maximum context**, so
+right-sizing can only ever recover 8192/6625 = **1.24×**. The 4–8× figure assumes short sequences
+against a large reservation — a chatbot workload, not a k=5 document-RAG one.
+
+**And the comparison is against a strawman anyway.** HuggingFace's `DynamicCache` — the actual
+measured baseline (D14) — already grows on demand and does *not* pre-reserve `max_seq_len`. So
+"paging beats static over-reservation" describes a baseline nobody runs.
+
+### What paging genuinely buys here, stated honestly
+
+1. **Prefix sharing: 8.3%**, and this is the real lever (see Finding 3).
+2. **No per-token reallocation.** `DynamicCache` concatenates the whole cache each decode step —
+   O(prefix) memory traffic per token. Paged writes one slot. Untested as a *latency* claim; needs
+   the T4.
+3. **Block-granularity admission and eviction**, which is what makes the Phase 5 scheduler
+   possible at all. A contiguous cache cannot hand back a finished sequence's memory mid-batch.
+
+**The README must lead with (2) and (3), not with a concurrency multiple.** Claiming 4–8× here
+would not survive one question about sequence length versus max context.
+
+### Finding 3 — ordering retrieved documents canonically nearly doubles the sharing win
+
+Prompts currently place the gold document first, then differing neighbours, so two queries about
+the same page share exactly one document. Sorting the retrieved set by document id instead of
+relevance makes the common prefix longer:
+
+**8.3% → 14.8% saving, a 78% improvement, for a one-line change in prompt assembly.**
+
+This is a genuine systems lever and I have not seen it in the RAG literature: *retrieved-document
+ordering is a prefix-cache-hit-rate decision, not only a relevance decision.* It trades against
+position effects in answer quality (documents early in the prompt get attended to differently),
+which makes it a measurable quality-vs-memory tradeoff rather than a free win.
+
+**Deferred to Phase 4**, where the quality harness exists to price the tradeoff. Changing prompt
+assembly now would bump `PROMPT_FORMAT_VERSION` and invalidate the frozen trace and the T4
+baseline — for a change that must be quality-tested before adoption regardless.
 
 ---
 
