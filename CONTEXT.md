@@ -519,6 +519,29 @@ A 3.7-second TTFT at batch 1 is already a poor experience; 25 seconds at batch 4
 is the number chunked prefill (Phase 5) has to fix, and it makes the p99-TTFT-vs-throughput plot
 the honest centrepiece `01_EDGERAG.md` §5 asks for.
 
+### Finding 5 — the KV cache is worth 100× here, not the 2–3× the plan predicted
+
+| batch 1 | decode | peak alloc |
+|---|---|---|
+| `use_cache=True` | **25.95 tok/s** | 5.76 GiB |
+| `use_cache=False` | **0.26 tok/s** | 5.52 GiB |
+
+**100×**, against `01_EDGERAG.md` §5's "expect 2–3×". The plan's estimate assumes short prompts.
+The mechanism explains the gap exactly: without a cache every decode step re-attends the entire
+6,758-token retrieved prefix, so *one decode step costs one full prefill* — 1/3.73 s = 0.27 tok/s,
+which is what was measured. The cache converts O(prefix) per-token work into O(1).
+
+**This is a RAG-specific result, and it is the honest framing:** the longer the retrieved context,
+the more the KV cache is worth. A chatbot with a 200-token prompt would see something near the
+plan's 2–3×. Quote the ratio *with* the mechanism, never alone.
+
+The memory column is the more interesting half. **Disabling the cache saves only 0.24 GiB (4%)
+while costing 100× throughput.** Naively the cache should cost its full 1.27 GiB, but with
+`use_cache=False` every step still runs a full-sequence forward whose activations dominate the
+peak. So at batch 1 the KV cache is not a memory-vs-speed tradeoff at all — it is nearly free.
+Paging earns its keep at *concurrency*, where the KV terms add up and the activation peak does
+not, which is precisely the regime Phase 3 targets.
+
 **Harness change made in response:** the markdown table now reports per-sequence *and* aggregate
 tok/s. Reporting only per-sequence makes batching look like a regression, which is a self-inflicted
 wound in an interview.

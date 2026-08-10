@@ -51,7 +51,36 @@ query ──► hybrid retrieval ──► top-k docs ──► prefix-shared KV
 
 ## Benchmarks
 
-_Phase 1 populates this._ Methodology is fixed and enforced in code, not by convention:
+### Baseline — HuggingFace `generate()`, SmolVLM2-2.2B, Tesla T4
+
+Every later number is measured against this. Workload is the frozen trace `94b148a0b9f5006e`:
+k=5 retrieved document pages per query, ~6,758 prefill tokens median, 75.4% of them visual.
+
+| batch | TTFT p50 | tok/s per seq | tok/s aggregate | peak allocated |
+|---:|---:|---:|---:|---:|
+| 1 | 3,730 ms | 26.0 | 26.0 | **5.76 GiB** |
+| 2 | 11,071 ms | 15.9 | 31.8 | 7.90 GiB |
+| 4 | 25,006 ms | 8.6 | 34.6 | 12.41 GiB |
+
+**The baseline does not fit the 4 GB target for even one request.** 5.76 GiB at batch 1, before
+any concurrency. The problem is not that the naive pipeline is inefficient — it is that it does
+not run on the target device.
+
+Two things this table is saying that are easy to misread:
+
+- **Aggregate throughput rises 1.32× for 4× the batch.** Per-sequence tok/s *falls*; that is
+  batching working, not failing. The ceiling is low because this checkpoint is MHA (32 query
+  heads, 32 KV heads), so decode is bandwidth-bound on KV reads at 192 KiB/token. Scheduling
+  cannot recover that — only cutting KV bytes can.
+- **TTFT degrades superlinearly** (1× → 2.97× → 6.7×), because left-padding pads every request to
+  the batch maximum. This is what chunked prefill has to fix.
+
+**KV cache on/off** at batch 1: 25.95 tok/s vs **0.26 tok/s — 100×**, against the 2–3× a
+short-prompt workload would show. Without a cache each decode step re-attends the whole
+6,758-token prefix, so one decode step costs one full prefill. Notably it saves only 0.24 GiB,
+so at batch 1 the cache is nearly free in memory terms; paging earns its keep at concurrency.
+
+Methodology is fixed and enforced in code, not by convention:
 
 - warmup discarded, `torch.cuda.synchronize()` on both sides of every timed region
 - p50/p95/p99 reported, never a bare mean; p99 flagged when computed from <100 samples
