@@ -185,13 +185,23 @@ def probe_max_batch(
 ) -> dict[str, Any]:
     """Find the largest batch a naive HF pipeline sustains before OOM.
 
-    This is the denominator for every concurrency claim in Phase 3. CUDA OOM is a recoverable
-    Python exception (unlike a device-side assert, which poisons the context -- ``BUGS.md`` L-01),
-    so the probe can walk upward and stop cleanly.
+    This is the **denominator for every concurrency claim in Phase 3**, so it has to be the actual
+    maximum, not a lower bound. Doubling alone (1, 2, 4, 8) only proves "at least 4, fewer than 8";
+    reporting that 4 as *the* baseline would inflate a later "Nx more concurrent sequences" claim
+    by up to 75%. So the doubling phase is followed by a **linear refinement** between the last
+    success and the first failure.
+
+    CUDA OOM is a recoverable Python exception (unlike a device-side assert, which poisons the
+    context -- ``BUGS.md`` L-01), so the probe can keep going after a failure.
     """
-    results: dict[str, Any] = {"attempted": [], "max_ok": 0, "oom_at": None}
-    batch = 1
-    while batch <= ceiling and len(entries) >= batch:
+    results: dict[str, Any] = {
+        "attempted": [],
+        "max_ok": 0,
+        "oom_at": None,
+        "refined": False,
+    }
+
+    def attempt(batch: int) -> bool:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         try:
@@ -209,13 +219,37 @@ def probe_max_batch(
             results["attempted"].append(
                 {"batch": batch, "ok": True, "peak_gib": round(peak / 1024**3, 3)}
             )
-            results["max_ok"] = batch
+            del inputs
+            return True
         except torch.cuda.OutOfMemoryError:
             results["attempted"].append({"batch": batch, "ok": False})
-            results["oom_at"] = batch
             torch.cuda.empty_cache()
+            return False
+
+    # Phase 1: double until failure, to bracket the answer cheaply.
+    batch = 1
+    while batch <= ceiling and len(entries) >= batch:
+        if attempt(batch):
+            results["max_ok"] = batch
+            batch *= 2
+        else:
+            results["oom_at"] = batch
             break
-        batch *= 2
+
+    # Phase 2: walk the gap linearly. Without this, max_ok is a lower bound wearing the name of
+    # a maximum.
+    if results["oom_at"] is not None:
+        for candidate in range(results["max_ok"] + 1, results["oom_at"]):
+            if len(entries) < candidate:
+                break
+            if attempt(candidate):
+                results["max_ok"] = candidate
+                results["refined"] = True
+            else:
+                results["oom_at"] = candidate
+                results["refined"] = True
+                break
+
     return results
 
 

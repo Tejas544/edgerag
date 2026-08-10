@@ -81,11 +81,18 @@ Re-running after a disconnect skips whatever already completed.
 ### Cell 6 — bring the results home
 
 ```python
-!cat /content/drive/MyDrive/edgerag/oom_probe.json
-!cp /content/drive/MyDrive/edgerag/baseline.jsonl /content/edgerag/results/
 %cd /content/edgerag
-!python -c "from bench.bench import JsonlWriter, records_to_markdown; from pathlib import Path; print(records_to_markdown(JsonlWriter(Path('results/baseline.jsonl')).read_all(), ignore=['batch_size','max_new_tokens']))"
+!mkdir -p results
+!cp /content/drive/MyDrive/edgerag/baseline.jsonl /content/drive/MyDrive/edgerag/oom_probe.json results/
+!cat results/oom_probe.json
+!python -c "import json; from bench.bench import records_to_markdown; rows=[json.loads(l) for l in open('results/baseline.jsonl') if l.strip()]; print(records_to_markdown([r for r in rows if 'nocache' not in r['name']], ignore=['batch_size']))"
 ```
+
+`mkdir -p results` matters: git does not track empty directories, so a fresh clone has no
+`results/` and `cp` fails with *"cannot create regular file … Not a directory"*. The failure is
+quiet — the table then renders `_no records_` rather than erroring. The `nocache` row is filtered
+out because it generates 16 tokens against the others' 64, so the harness correctly refuses to
+tabulate it alongside them.
 
 Download `baseline.jsonl` from Drive and commit it to `results/`. Those numbers are the
 denominator for every claim in the README.

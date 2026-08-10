@@ -1,0 +1,27 @@
+{
+  "attempted": [
+    {
+      "batch": 1,
+      "ok": true,
+      "peak_gib": 5.763
+    },
+    {
+      "batch": 2,
+      "ok": true,
+      "peak_gib": 7.903
+    },
+    {
+      "batch": 4,
+      "ok": true,
+      "peak_gib": 12.413
+    },
+    {
+      "batch": 8,
+      "ok": false
+    }
+  ],
+  "max_ok": 4,
+  "oom_at": 8,
+  "device": "Tesla T4",
+  "workload_fingerprint": "94b148a0b9f5006e"
+}

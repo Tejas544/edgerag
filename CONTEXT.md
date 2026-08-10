@@ -519,7 +519,23 @@ A 3.7-second TTFT at batch 1 is already a poor experience; 25 seconds at batch 4
 is the number chunked prefill (Phase 5) has to fix, and it makes the p99-TTFT-vs-throughput plot
 the honest centrepiece `01_EDGERAG.md` §5 asks for.
 
-### Finding 5 — the KV cache is worth 100× here, not the 2–3× the plan predicted
+### Finding 5 — max concurrency is 4, and that number needs an asterisk
+
+`oom_probe`: batch 1 (5.76 GiB), 2 (7.90), 4 (12.41) succeed; **batch 8 OOMs** on a 14.6 GiB T4.
+
+**A naive HF pipeline sustains 4 concurrent k=5 RAG requests on a 16 GB card** — and cannot run
+one within the project's own 4 GiB budget. That is the denominator for every Phase 3 concurrency
+claim.
+
+**The asterisk, and it is mine:** the probe doubled (1, 2, 4, 8), so it proves *at least 4 and
+fewer than 8*. The true maximum may be 5, 6, or 7. Reporting 4 as "the maximum" would inflate a
+later "N× more concurrent sequences" headline **by up to 75%** — exactly the kind of denominator an
+interviewer checks. `probe_max_batch` now walks the gap linearly after the doubling phase, so the
+figure is a maximum rather than a lower bound wearing the name of one. Re-run on the next T4
+session before any concurrency claim is published; until then the baseline is recorded as
+**"≥4, <8"**, not 4.
+
+### Finding 6 — the KV cache is worth 100× here, not the 2–3× the plan predicted
 
 | batch 1 | decode | peak alloc |
 |---|---|---|
