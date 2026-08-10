@@ -46,11 +46,17 @@ class EdgeRagDecoder(nn.Module):
         position_ids: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         cache: object | None = None,
+        compressor: object | None = None,
+        visual_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return logits of shape ``(batch, seq_len, vocab_size)``.
 
         ``inputs_embeds`` is how multimodal input arrives: image features are merged into the
         embedding stream before this is called, so the decoder itself never knows about images.
+
+        ``compressor`` enables FastV visual-token pruning (Phase 4). Pruning is a *forward-pass*
+        concern rather than a cache one -- hidden states, positions, and the mask all shrink
+        together at the cut layer -- which is why it lives here and not in the cache.
         """
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("pass exactly one of input_ids or inputs_embeds")
@@ -73,8 +79,28 @@ class EdgeRagDecoder(nn.Module):
             seq_len, past_len, hidden.dtype, hidden.device, padding_mask
         )
 
-        for layer in self.layers:
-            hidden = layer(hidden, cos, sin, attn_mask, cache)
+        # Pruning only makes sense during prefill: at decode there is one token and it is the one
+        # being generated from.
+        prune_at = (
+            compressor.config.score_layer
+            if compressor is not None and compressor.config.enabled and seq_len > 1
+            else -1
+        )
+
+        for idx, layer in enumerate(self.layers):
+            need_weights = idx == prune_at - 1
+            hidden, weights = layer(hidden, cos, sin, attn_mask, cache, need_weights)
+
+            if idx == prune_at - 1 and weights is not None:
+                keep = compressor.select(weights[0], visual_mask[0])
+                hidden = hidden[:, keep]
+                cos, sin = cos[:, keep], sin[:, keep]
+                # Rebuild the mask over the survivors. They stay in ascending original order, so
+                # causality among them is preserved and a standard causal mask is still valid --
+                # over the *pruned* length, which is why it cannot simply be sliced.
+                attn_mask = build_causal_mask(
+                    keep.numel(), 0, hidden.dtype, hidden.device, None
+                )
 
         return self.lm_head(self.norm(hidden))
 

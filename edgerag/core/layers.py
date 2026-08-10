@@ -140,7 +140,8 @@ def eager_attention(
     attn_mask: torch.Tensor | None,
     scaling: float,
     n_rep: int,
-) -> torch.Tensor:
+    need_weights: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Scaled dot-product attention, written out.
 
     Deliberately eager rather than ``F.scaled_dot_product_attention``: this is the reference the
@@ -161,7 +162,10 @@ def eager_attention(
 
     # fp32 softmax, then back. BUGS.md P-07.
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    return torch.matmul(attn_weights, value).transpose(1, 2).contiguous()
+    out = torch.matmul(attn_weights, value).transpose(1, 2).contiguous()
+    # Returned only when asked: the weights are (B, H, Q, K) and materialising them for every
+    # layer would cost more memory than the KV cache they are used to shrink.
+    return out, (attn_weights if need_weights else None)
 
 
 def build_causal_mask(
@@ -220,7 +224,8 @@ class Attention(nn.Module):
         sin: torch.Tensor,
         attn_mask: torch.Tensor | None,
         cache: object | None = None,
-    ) -> torch.Tensor:
+        need_weights: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         batch, seq_len, _ = hidden_states.shape
         shape = (batch, seq_len, -1, self.head_dim)
 
@@ -235,8 +240,10 @@ class Attention(nn.Module):
         if cache is not None:
             k, v = cache.update(k, v, self.layer_idx)
 
-        out = eager_attention(q, k, v, attn_mask, self.scaling, self.n_rep)
-        return self.o_proj(out.reshape(batch, seq_len, -1))
+        out, weights = eager_attention(
+            q, k, v, attn_mask, self.scaling, self.n_rep, need_weights=need_weights
+        )
+        return self.o_proj(out.reshape(batch, seq_len, -1)), weights
 
 
 class SwiGLUMLP(nn.Module):
@@ -275,8 +282,11 @@ class DecoderLayer(nn.Module):
         sin: torch.Tensor,
         attn_mask: torch.Tensor | None,
         cache: object | None = None,
-    ) -> torch.Tensor:
-        hidden_states = hidden_states + self.self_attn(
-            self.input_layernorm(hidden_states), cos, sin, attn_mask, cache
+        need_weights: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        attn_out, weights = self.self_attn(
+            self.input_layernorm(hidden_states), cos, sin, attn_mask, cache, need_weights
         )
-        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = hidden_states + attn_out
+        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        return hidden_states, weights

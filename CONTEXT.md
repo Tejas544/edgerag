@@ -675,6 +675,65 @@ penalises arrivals during a spike, which is the better trade.
 
 ---
 
+## D17 · Visual pruning: the memory half, measured · **MEASURED** · 2026-08-10
+
+FastV at layer 2 on the headline model. **22 of 24 layers (92%) store the reduced set**, which is
+why the MiB saved far exceeds the fraction of tokens dropped. Mean request: 6,804 tokens, 5,159
+visual (75.8%).
+
+| keep | visual kept | KV MiB | reclaimed | saving |
+|---:|---:|---:|---:|---:|
+| 1.000 | 5,159 | 1,276 | 0 | 0.0% |
+| 0.750 | 3,869 | 1,054 | 222 | 17.4% |
+| **0.500** | 2,579 | 832 | **443** | **34.8%** |
+| 0.250 | 1,289 | 611 | 665 | 52.1% |
+| 0.125 | 644 | 500 | 776 | 60.8% |
+
+**Pruning half the visual tokens reclaims 443 MiB per request — more than the entire INT4 weight
+saving (≈3.1 GiB → 1.05 GiB is a one-off; this is per request and scales with concurrency).**
+D11 predicted ~494 MiB at 50%; the measured 443 is close, the gap being the text tokens and the
+two layers below the cut.
+
+**Against the 4 GiB ceiling**, INT4 weights (1.05 GiB) plus one request:
+
+| | KV | total | verdict |
+|---|---|---|---|
+| baseline fp16, no pruning (measured, D14) | — | **5.76 GiB** | does not fit |
+| INT4 + no pruning | 1.28 GiB | 2.29 GiB | fits |
+| INT4 + 50% pruning | 0.83 GiB | **1.86 GiB** | fits, with room for a second request |
+
+That is the project's thesis in one table: from *does not run on the target device* to *fits with
+headroom*, and the two levers are independent.
+
+### This is half a result and must not ship alone
+
+The quality axis needs the 2.2B and therefore a T4 (`scripts/colab_pruning_quality.py`). A memory
+curve published without its quality curve is the flattering half. The plan's target is 50–75%
+of visual tokens removed at ≥95% quality retention; whether 0.5 clears that is **unmeasured**.
+
+Two controls are built into the quality script:
+- **`uniform` stride at every ratio.** If attention-based selection does not beat evenly-spaced
+  selection, the honest finding is "visual tokens are redundant on this workload", not "FastV
+  works". That distinction is the difference between a result and a citation.
+- **`keep_ratio=1.0` proven bit-identical to no compressor** (`atol=0, rtol=0` in
+  `tests/test_fastv.py`), so the baseline row is the real baseline.
+
+### Scoring mode is a genuine fork, not a detail
+
+`visual_token_scores` supports two modes and they answer different questions:
+- **`last_row`** (default, FastV's choice): score by what the *final* prompt token attends to.
+  Every decode query resembles that one, so it is the best available predictor of what generation
+  will need. Pruning is a bet about the future and this bets with the closest observation.
+- **`mean`**: average over all attending queries, normalised by how many queries could see each
+  key. More signal and less sensitive to one odd final token, but it measures what the *prompt*
+  attended to, which is not the same question.
+
+The normalisation in `mean` matters: without it, token *j* is scored across all *S* queries when
+only *S−j* could see it, which systematically under-scores late tokens — and in a RAG prompt the
+late tokens are the most recently retrieved document. Both modes go in the ablation.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |

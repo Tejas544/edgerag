@@ -317,6 +317,16 @@ the skip list is itself an interview answer.
 reason SmoothQuant/AWQ exist. Expect it; if you see it, you've independently rediscovered a real
 result — say so.
 
+**P-27 · The test suite itself is a memory hog and crashed once.** ⚠️ *observed 2026-08-10, not
+yet reproduced* — one full-suite run died mid-collection with a fatal interpreter error; three
+subsequent runs passed. Three test modules now each hold a module-scoped model fixture
+(`test_equivalence` loads fp32-CPU *and* fp16-CUDA, `test_paged` and `test_fastv` one each), so a
+single session can hold four copies of the fixture model on a 4 GiB card and a memory-constrained
+host. *Symptom:* a crash with no failing test, which reads as flaky infrastructure and gets
+ignored. *If it recurs:* consolidate the fixtures into one session-scoped bundle rather than
+raising the machine's limits. Recorded now because "it passed on the retry" is how a real
+resource bug gets buried.
+
 **P-26 · An all-black page is indistinguishable from a padding sub-image.** `get_image_features`
 identifies padding as "every pixel is 0.0" and drops those images before the tower. A genuinely
 black scanned page — not rare in a document corpus — is silently dropped, so its `<image>` tokens

@@ -46,12 +46,17 @@ class PagedKVCache:
         dtype: torch.dtype = torch.float16,
         pool: list[torch.Tensor] | None = None,
         value_pool: list[torch.Tensor] | None = None,
+        first_layer: int = 0,
     ) -> None:
         self.spec = spec
         self.allocator = allocator
         self.device = device
         self.dtype = dtype
         self.table = BlockTable(allocator=allocator)
+        # Which layer index owns the once-per-forward bookkeeping. Normally 0, but a cache that
+        # only serves layers >= k (Phase 4's pruned half) never sees layer 0 and would otherwise
+        # never grow. See edgerag/cache/compressed.py.
+        self.first_layer = first_layer
 
         shape = (allocator.num_blocks, allocator.block_size, spec.n_kv_heads, spec.head_dim)
         # Pools are shareable so several sequences can page into one physical arena -- the whole
@@ -104,7 +109,7 @@ class PagedKVCache:
             )
         n_new = key.shape[2]
 
-        if layer_idx == 0:
+        if layer_idx == self.first_layer:
             self._pending_tokens = n_new
             self.table.append(n_new)
             # Split any shared block this write will touch, once, across every layer's pool.
@@ -209,6 +214,7 @@ class PagedKVCache:
             self.dtype,
             pool=self.key_pool,
             value_pool=self.value_pool,
+            first_layer=self.first_layer,
         )
         child.table = self.table.fork()
         return child

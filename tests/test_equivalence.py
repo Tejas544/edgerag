@@ -160,7 +160,7 @@ def test_hidden_states_are_bit_identical_in_fp32(hf_bundle, ours) -> None:
         cos, sin = ours.rotary(hidden, pos)
         mask = build_causal_mask(ids.shape[1], 0, hidden.dtype, device)
         for layer in ours.layers:
-            hidden = layer(hidden, cos, sin, mask, None)
+            hidden, _ = layer(hidden, cos, sin, mask, None)
         actual = ours.norm(hidden)
 
     torch.testing.assert_close(actual, expected, atol=EXACT_ATOL, rtol=EXACT_RTOL)
