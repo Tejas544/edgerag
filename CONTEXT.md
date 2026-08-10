@@ -423,6 +423,45 @@ size needs tuning rather than the default.
 
 ---
 
+## D13 · Correctness gates run in fp32, not fp16 · **ACCEPTED** · 2026-08-10
+
+**Measured 2026-08-10**, our decoder vs HuggingFace, 256M fixture, seq 64, eager attention both
+sides:
+
+| precision | max abs Δ logits | mean abs Δ | greedy argmax |
+|---|---|---|---|
+| **fp32 / CPU** | **0.000e+00** | **0.000e+00** | identical |
+| fp16 / CUDA | 1.75e-01 | 1.97e-02 | identical |
+
+**In fp32 the output is bit-identical** — hidden states too, not just logits. The implementation is
+not "close to" HF's, it *is* HF's arithmetic. The fp16 divergence is accumulation order: same
+operations, different cuBLAS kernel selection driven by tensor layout, compounded over 30 layers.
+
+**Decision:** every correctness gate — Phase 2's, and Phase 3's paged-cache gate — runs in
+**fp32**, where the expected difference is *zero* and the tolerance is 1e-6. fp16 is tested
+separately and only for the property that actually matters functionally: **identical greedy
+token ids**.
+
+**Rejected:** *a single fp16 test with a tolerance loose enough to pass.* That was the original
+design and it failed at seq_len=2 on 4 elements out of 98,560. The obvious fix — widen `atol` from
+2e-2 to 3e-2 — is the trap: a tolerance wide enough to absorb fp16 noise is wide enough to hide a
+real bug, and there is no principled place to stop widening it.
+
+**Why this matters more in Phase 3 than here.** `BUGS.md` P-07 predicted an evening lost to "the
+equivalence test fails at long context and it is *not* a bug, it is fp16." Running the gate in
+fp32 **eliminates that entire class of confusion**: any nonzero difference is a bug, full stop.
+When the paged allocator disagrees with the naive cache by 1e-3, there is no judgement call about
+whether 1e-3 is acceptable — it is not, and the search starts immediately. That is worth
+considerably more than the wall-clock cost of running the gate on CPU.
+
+**Cost:** fp32 CPU runs on the 256M fixture, which is why D4's two-tier split exists. Sequence
+lengths in the fp32 sweep stay modest to keep the suite in the seconds range.
+
+**Interview value:** "how do you know your implementation is correct?" answered with *bit-identical
+in fp32* is a materially stronger answer than *within tolerance*.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
@@ -431,4 +470,4 @@ size needs tuning rather than the default.
 | P2 | Equivalence tolerance: what `atol/rtol` and why. fp16 softmax accumulation drift grows with sequence length — a tolerance chosen at seq 32 will fail at seq 2048. Likely: upcast softmax to fp32, set tolerance per-length. | Phase 2 |
 | P3 | Memory-budget definition: does the 4 GB include the ~300–600 MB CUDA context? **Recommend: exclude it, state it explicitly, and report it as a separate line.** Silently excluding it is the kind of thing that unravels an otherwise good conversation. | Phase 8 |
 | P4 | Quality metric for the pruning sweep: ANLS vs exact-match vs LLM-judge. Leaning **ANLS** (standard for DocVQA, no extra model resident). | Phase 4 |
-| P5 | **Batched VLM requests pad the sub-image dimension to the batch maximum.** Measured 2026-08-10: batching a 57-sub-image request with a 61 one yields `pixel_values (2, 61, ...)` — four phantom images pushed through 12–27 tower layers for nothing. Document pages vary widely in aspect ratio, so this waste is the norm, not an edge case. Options: (a) group requests by sub-image count in the scheduler, (b) run the tower **per request, unbatched**, and batch only the decoder — attractive because the tower is prefill-only and D12 already chunks it. Leaning (b). | Phase 5 |
+| ~~P5~~ | **WITHDRAWN 2026-08-10 — the claim was wrong.** I reported that batching a 57-sub-image request with a 61 one wastes tower compute on four phantom images, inferred from `pixel_values` having shape `(2, 61, ...)`. Reading `SmolVLMModel.get_image_features` shows it drops all-zero padding images (`real_images_inds`) *before* the tower runs. The padded tensor costs memory; it costs no compute. Lesson: a tensor shape is not a code path. Residual real issue is much smaller and tracked as `BUGS.md` P-26 (an all-black page is indistinguishable from padding). | — |

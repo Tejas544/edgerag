@@ -36,6 +36,33 @@ DTYPE_BYTES: dict[str, int] = {
 }
 
 
+def _read_rope_theta(text_config: Any, model_id: str) -> float:
+    """Read RoPE base frequency, refusing to guess. See ``BUGS.md`` B-02.
+
+    In transformers v5 this lives in ``text_config.rope_parameters["rope_theta"]``. The
+    top-level ``rope_theta`` attribute is absent, so the natural ``getattr(..., 10000.0)``
+    silently yields a value that is wrong by an order of magnitude for every SmolVLM checkpoint
+    (100000 for the 256M, 130000 for the 2.2B -- and note they differ from each other, so there
+    is no safe constant to hardcode either).
+
+    A wrong theta does not crash. It produces a model that attends to the wrong relative
+    positions and generates fluent nonsense, which reads as a broken RoPE implementation.
+    """
+    params = getattr(text_config, "rope_parameters", None)
+    if isinstance(params, dict) and params.get("rope_theta") is not None:
+        return float(params["rope_theta"])
+
+    direct = getattr(text_config, "rope_theta", None)
+    if direct is not None:
+        return float(direct)
+
+    raise ValueError(
+        f"{model_id}: could not find rope_theta in text_config.rope_parameters or as a direct "
+        "attribute. Refusing to fall back to a default -- a wrong RoPE base does not crash, it "
+        "silently produces fluent nonsense (BUGS.md B-02)."
+    )
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """The subset of a VLM config that governs memory.
@@ -72,6 +99,12 @@ class ModelSpec:
     #: composite config ships 128002 (a Llama-3 leftover), which is out of range for a 49280-token
     #: vocabulary and would index off the end of the embedding table during padded batching.
     pad_token_id: int = 2
+
+    #: Norm/activation constants. Read from config rather than assumed: Llama's library default
+    #: eps is 1e-6, but every SmolVLM checkpoint ships 1e-5.
+    rms_norm_eps: float = 1e-5
+    intermediate_size: int = 0
+    hidden_act: str = "silu"
 
     # --- attention shape ---------------------------------------------------------------------
 
@@ -164,10 +197,11 @@ class ModelSpec:
         """Build a spec from a HuggingFace config object.
 
         Reads through ``text_config`` / ``vision_config`` and falls back for fields that some
-        checkpoints omit. ``rope_theta`` in particular is absent from several SmolVLM configs and
-        silently defaults to 10000.0 in the modelling code -- reading it here rather than
-        hardcoding it downstream means our RoPE cannot quietly disagree with HF's
-        (``BUGS.md`` P-09).
+        ``rope_theta`` is the dangerous one -- see ``BUGS.md`` B-02. It is **not** a top-level
+        attribute on these configs; it lives inside ``text_config.rope_parameters``. A plain
+        ``getattr(txt, "rope_theta", 10000.0)`` returns the default, which is wrong by 10-13x for
+        every SmolVLM checkpoint, and the resulting model produces fluent nonsense that looks like
+        a RoPE implementation bug rather than a config-read bug.
         """
         txt = config.text_config
         vis = config.vision_config
@@ -185,7 +219,7 @@ class ModelSpec:
             head_dim=head_dim,
             vocab_size=txt.vocab_size,
             max_position_embeddings=getattr(txt, "max_position_embeddings", 8192),
-            rope_theta=float(getattr(txt, "rope_theta", None) or 10000.0),
+            rope_theta=_read_rope_theta(txt, model_id),
             vision_layers=vis.num_hidden_layers,
             vision_hidden=vis.hidden_size,
             vision_image_size=vis.image_size,
@@ -194,6 +228,9 @@ class ModelSpec:
             image_token_id=config.image_token_id,
             # text_config, deliberately -- BUGS.md L-01.
             pad_token_id=int(getattr(txt, "pad_token_id", None) or 0),
+            rms_norm_eps=float(txt.rms_norm_eps),
+            intermediate_size=int(txt.intermediate_size),
+            hidden_act=str(txt.hidden_act),
         )
 
     def to_dict(self) -> dict[str, Any]:

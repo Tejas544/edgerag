@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from edgerag.core.spec import GIB, ModelSpec
+from edgerag.core.spec import GIB, ModelSpec, _read_rope_theta
 
 # SmolVLM2-2.2B-Instruct -- the headline model. Note n_kv_heads == n_q_heads: full MHA.
 SPEC_2B = ModelSpec(
@@ -24,7 +24,7 @@ SPEC_2B = ModelSpec(
     head_dim=64,
     vocab_size=49280,
     max_position_embeddings=8192,
-    rope_theta=10000.0,
+    rope_theta=130000.0,  # NOT the 10000 library default -- BUGS.md B-02
     vision_layers=27,
     vision_hidden=1152,
     vision_image_size=384,
@@ -44,7 +44,7 @@ SPEC_256M = ModelSpec(
     head_dim=64,
     vocab_size=49280,
     max_position_embeddings=8192,
-    rope_theta=10000.0,
+    rope_theta=100000.0,  # and it differs from the 2.2B's -- no safe constant exists
     vision_layers=12,
     vision_hidden=768,
     vision_image_size=512,
@@ -104,6 +104,60 @@ def test_out_of_range_pad_token_rejected_at_construction() -> None:
 def test_both_tiers_have_a_valid_pad_token() -> None:
     for spec in (SPEC_2B, SPEC_256M):
         assert 0 <= spec.pad_token_id < spec.vocab_size
+
+
+# --- BUGS.md B-02 -----------------------------------------------------------------------------
+
+
+def test_rope_theta_is_read_from_nested_rope_parameters() -> None:
+    """The value lives in ``text_config.rope_parameters``, not as a direct attribute.
+
+    A plain ``getattr(txt, "rope_theta", 10000.0)`` returns the default, which is wrong by 10-13x
+    and yields a model that runs and emits fluent nonsense.
+    """
+
+    class FakeText:
+        rope_theta = None  # exactly how the shipped configs look
+
+        def __init__(self) -> None:
+            self.rope_parameters = {"rope_theta": 130000, "rope_type": "default"}
+
+    assert _read_rope_theta(FakeText(), "fake") == 130000.0
+
+
+def test_rope_theta_falls_back_to_a_direct_attribute() -> None:
+    class FakeText:
+        rope_parameters = None
+        rope_theta = 500000.0
+
+    assert _read_rope_theta(FakeText(), "fake") == 500000.0
+
+
+def test_missing_rope_theta_raises_rather_than_defaulting() -> None:
+    """No silent default. A wrong RoPE base does not crash -- it degrades quality invisibly."""
+
+    class FakeText:
+        rope_parameters = None
+        rope_theta = None
+
+    with pytest.raises(ValueError, match="Refusing to fall back"):
+        _read_rope_theta(FakeText(), "fake")
+
+
+def test_the_two_tiers_disagree_on_rope_theta() -> None:
+    """Pinned because it kills the tempting shortcut of hardcoding one constant."""
+    assert SPEC_2B.rope_theta == 130000.0
+    assert SPEC_256M.rope_theta == 100000.0
+    assert SPEC_2B.rope_theta != SPEC_256M.rope_theta
+
+
+def test_rms_norm_eps_is_not_the_llama_default() -> None:
+    """Llama's library default is 1e-6; every SmolVLM checkpoint ships 1e-5.
+
+    The same trap as B-02, one constant over.
+    """
+    assert SPEC_2B.rms_norm_eps == 1e-5
+    assert SPEC_256M.rms_norm_eps == 1e-5
 
 
 # --- KV arithmetic (01_EDGERAG.md §7 question 1) ---------------------------------------------

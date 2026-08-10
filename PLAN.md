@@ -110,7 +110,7 @@ first README benchmark table rendered.
 
 ---
 
-## Phase 2 — Own the forward pass + naive KV cache · Aug 11 · ~5 hrs
+## Phase 2 — Own the forward pass + naive KV cache · Aug 10 · ✅ **DONE**
 
 - Our decoder forward: RMSNorm, RoPE, GQA attention, SwiGLU, the decode loop, sampling.
 - HF retained for: weight loading, tokenizer/processor, and the **vision tower forward**.
@@ -123,8 +123,19 @@ first README benchmark table rendered.
   in `CONTEXT.md`. Run against the **256M model** so the suite finishes in seconds and you
   actually run it every commit.
 
-**Gate:** `pytest tests/test_equivalence.py` green · Plot 1 (tok/s vs seq len, cache on/off)
-committed.
+**Gate: GREEN.** 32 equivalence tests pass. Our decoder is **bit-identical to HuggingFace in
+fp32** — logits *and* hidden states, difference exactly 0.000e+00 — so the gate runs at 1e-6
+tolerance rather than a fudge factor (`CONTEXT.md` D13).
+
+Two tolerance bands, and the distinction carries into Phase 3:
+- **Same GEMM shape** (our prefill vs HF prefill, cached prefill vs uncached): `1e-6`, bit-exact.
+- **Different GEMM shape** (cached decode vs full prefill): `1e-4`. Measured noise is 2.1e-05 —
+  identical mathematics, different reduction order. **Phase 3's paged cache gathers blocks and so
+  changes GEMM shape too; it should expect ~1e-5 against naive, not 0.** Knowing that now is what
+  stops `BUGS.md` P-07 costing an evening.
+
+**Still outstanding:** Plot 1 (tok/s vs seq len, cache on/off) needs T4 numbers — local timings are
+unpublishable per D4, so it lands with the Colab baseline.
 
 ---
 

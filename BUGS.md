@@ -69,6 +69,46 @@ be validated by "it ran." It needs a *coverage* assertion at the call site. This
 to the Phase 3 allocator, where `free()` on an already-free block is the same shape of bug —
 plausible state, no exception, wrong answer.
 
+### B-02 · `rope_theta` silently defaulting to 10000 instead of 100000/130000 · 2026-08-10 · Phase 2
+
+**Symptom:** none yet — caught by probing the config before writing RoPE, not by debugging output.
+Had it shipped, the symptom would have been a model that loads, runs, and emits fluent, confident,
+wrong text.
+
+**Wrong theory (the one this narrowly avoided):** that `rope_theta` behaves like every other field
+and can be read with `getattr(text_config, "rope_theta", 10000.0)`. It returns `None`, so the
+default applies.
+
+**Root cause:** in transformers v5 the value moved into a nested dict —
+`text_config.rope_parameters["rope_theta"]`. The actual values are **100000** for SmolVLM2-256M and
+**130000** for SmolVLM2-2.2B. The library default of 10000 is therefore wrong by 10–13×, *and the
+two checkpoints disagree with each other*, so hardcoding a constant would have been wrong too.
+
+**Why it would have been expensive:** a wrong RoPE base does not crash, does not NaN, and does not
+fail a shape check. It changes the frequency at which positions rotate, so the model attends to
+subtly wrong relative positions. The output is grammatical. The natural diagnosis is "my RoPE
+implementation is wrong" (`BUGS.md` P-09) and the search goes to `rotate_half`, the `unsqueeze_dim`,
+the position offset — anywhere except the config reader, which "obviously works" because every
+other field it reads is correct.
+
+**Diagnosis:** printing every architectural constant needed for the reimplementation *before*
+writing any of it, and reading the values rather than scanning for `None`.
+
+**Fix:** `_read_rope_theta` in `edgerag/core/spec.py` reads `rope_parameters` first, falls back to
+the direct attribute, and **raises rather than defaulting** if neither exists.
+
+**Prevention:** no silent default. Pinned values for both tiers in `tests/test_spec.py`, so a
+checkpoint changing shape under us fails a test. Same treatment applied to `rms_norm_eps` — Llama's
+library default is 1e-6 but every SmolVLM checkpoint ships **1e-5**, which is the identical trap one
+constant over.
+
+**Cost:** ~15 min, entirely in prevention. Zero debugging.
+
+**The transferable lesson — this is the second instance of one pattern.** L-01 (`pad_token_id`) and
+B-02 (`rope_theta`) are the same bug: *the composite config and the nested config disagree, and the
+obvious read returns the wrong one.* For a value that will be silently wrong rather than loudly
+absent, `getattr(cfg, name, default)` is not a safe idiom — the default is the failure.
+
 ---
 
 ## Defused landmines
@@ -227,6 +267,16 @@ the skip list is itself an interview answer.
 **P-22 · fp16 overflow on outlier channels during dequant.** Activation outliers are the entire
 reason SmoothQuant/AWQ exist. Expect it; if you see it, you've independently rediscovered a real
 result — say so.
+
+**P-26 · An all-black page is indistinguishable from a padding sub-image.** `get_image_features`
+identifies padding as "every pixel is 0.0" and drops those images before the tower. A genuinely
+black scanned page — not rare in a document corpus — is silently dropped, so its `<image>` tokens
+receive embeddings belonging to a *different* image and every subsequent image in the sample
+shifts by one. *Symptom:* one document in the corpus produces confidently wrong answers while
+everything else works. *Note:* normalization runs before this check, so "all zeros" means all
+values equal to the dataset mean, not literally black — which makes it rarer but harder to reason
+about. *Detection:* assert that the number of image embeddings returned equals the number of
+`<image>` token groups in `input_ids`, which is a cheap invariant and also catches P-11.
 
 ### Retrieval
 

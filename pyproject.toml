@@ -30,6 +30,9 @@ include = ["edgerag*", "bench*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+markers = [
+    "slow: needs model weights on disk; deselect with -m 'not slow'",
+]
 filterwarnings = [
     # An untrusted-device warning is expected in most harness tests; unexpected ones should fail.
     "error::DeprecationWarning",
