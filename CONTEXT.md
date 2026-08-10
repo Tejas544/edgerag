@@ -637,6 +637,44 @@ baseline — for a change that must be quality-tested before adoption regardless
 
 ---
 
+## D16 · Preemption policy: swap, not recompute · **ACCEPTED** · 2026-08-10 · resolves P1
+
+**Decision:** **swap-to-pinned-host-memory**, victims chosen **newest-first**. `RECOMPUTE` and
+`REJECT` are implemented behind the same interface so the choice can be measured rather than
+argued.
+
+| policy | cost to resume | why not |
+|---|---|---|
+| **SWAP** | ~1.27 GiB over PCIe 3.0 x16 ≈ **100 ms** | — |
+| RECOMPUTE | one full prefill = **3,730 ms** (D14) | **37× worse** |
+| REJECT | request dies | honest under sustained overload, not a first resort |
+
+**This reverses the plan's lean, and the reason is a measurement.** `01_EDGERAG.md` §5 and my own
+P1 favoured recompute on the argument that *"prefill is compute-bound, so a T4 has spare FLOPs and
+recompute is cheap."* D14 kills it: TTFT is **3.73 s at batch 1**, because a k=5 RAG prompt is
+~6,758 tokens of which 75% are visual and must traverse the vision tower again. Recompute here
+costs *seconds*, and preempting a request would push p99 far past the point where any scheduler
+throughput gain is worth having.
+
+**Where the plan's instinct is right:** for short prompts, a host round-trip costs more than
+re-running prefill, and vLLM's recompute default is correct. The deciding variable is prefix
+length, and this workload sits at the far end of it. That is why the policy is a parameter with a
+measured justification rather than a constant — and it is a good answer to §7 question 4.
+
+**Victim selection is newest-first.** Oldest-first would discard the most accumulated work and
+livelock long requests: each preemption resets whichever request has waited longest. Newest-first
+penalises arrivals during a spike, which is the better trade.
+
+**Two constraints carried in from Phase 3a/3c:**
+- Copy-on-write can itself raise `OutOfBlocksError`, so admission control must reserve CoW headroom
+  or deadlock exactly when prefix sharing is helping most.
+- `swap_in` is an admission decision, not a guaranteed operation — the pool may have been taken.
+  The Phase 5 scheduler has to handle a failed restore.
+
+**Revisit if:** measured swap latency exceeds ~500 ms, at which point rejection beats both.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |

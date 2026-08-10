@@ -69,6 +69,55 @@ be validated by "it ran." It needs a *coverage* assertion at the call site. This
 to the Phase 3 allocator, where `free()` on an already-free block is the same shape of bug —
 plausible state, no exception, wrong answer.
 
+### B-03 · Forked sequences overwrote each other's KV — refcounts were right, data was not · 2026-08-10 · Phase 3c
+
+**Symptom:** none visible in the test suite. 53 paged-cache tests passed, including every fork and
+copy-on-write test. The defect was found by deliberately probing the data path that the
+bookkeeping tests did not touch.
+
+**Wrong theory:** that Phase 3b was complete because `fork`, `unshare`, and `writable_block_for`
+were implemented and tested. They were — and `PagedKVCache._write` never called any of them. It
+indexed `self.table.blocks` directly, so a forked sequence appended straight into blocks its
+sibling was still reading.
+
+**Root cause:** two of them, and the second only appears once the first is fixed.
+
+1. **The write path bypassed copy-on-write entirely.** The CoW machinery existed at the
+   `BlockTable` layer; the tensor writes went around it.
+2. **`unshare` repoints the mapping but does not copy the block's contents.** Fixing (1) alone
+   gives the forked sequence a private block full of **zeros** — a valid-looking mapping to data
+   that was never written. The answer degrades; nothing crashes.
+
+**Why the existing tests missed it:** they asserted on refcounts. Refcounting was correct
+throughout. `test_fork_shares_blocks_without_copying` and `test_writing_to_a_forked_block_splits_it`
+both passed against a cache that corrupted real KV, because neither looked at a tensor.
+
+**Diagnosis, and the part worth remembering:** the first reproduction attempt *failed*. Forking,
+then appending only from the child, left the parent intact — because `gather` slices to the
+parent's own `num_tokens`, so the child's write landed in slack the parent never reads. It looked
+like CoW was working. The giveaway was `copy_on_writes == 0`: the parent survived by luck, not by
+correctness. **Corruption needs both siblings to append** — the second writer overwrites the
+first's tokens, and the first then reads the second's data. Asymmetric bugs like this are why
+"I could not reproduce it" is weak evidence.
+
+**Fix:** `PagedKVCache._unshare_write_range` walks every logical block the write will touch, calls
+`unshare`, and on a split copies that block's KV across **all layers at once**. Done at layer 0 —
+splitting per layer would leave layers disagreeing about which block holds the sequence.
+`edgerag/cache/paged.py`.
+
+**Prevention:** `tests/test_cow.py` asserts on **tensor contents**, not refcounts: both siblings
+append, and each must see its own tokens and none of the other's. Plus the exact-multiple case,
+where no partial tail exists and CoW must *not* fire.
+
+**Cost:** ~30 min, all of it in finding a reproduction that actually failed.
+
+**The transferable lesson:** correct bookkeeping is not correct behaviour. Every allocator test in
+this project passes against a cache that serves the wrong data, because refcounts and tensors are
+different subsystems. Any test suite for a memory manager needs at least one assertion on the
+bytes.
+
+---
+
 ### B-02 · `rope_theta` silently defaulting to 10000 instead of 100000/130000 · 2026-08-10 · Phase 2
 
 **Symptom:** none yet — caught by probing the config before writing RoPE, not by debugging output.

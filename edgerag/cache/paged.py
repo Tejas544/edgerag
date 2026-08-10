@@ -107,12 +107,46 @@ class PagedKVCache:
         if layer_idx == 0:
             self._pending_tokens = n_new
             self.table.append(n_new)
+            # Split any shared block this write will touch, once, across every layer's pool.
+            self._unshare_write_range(self.seq_len - n_new, n_new)
 
         start = self.seq_len - self._pending_tokens
         self._write(self.key_pool[layer_idx], key, start, n_new)
         self._write(self.value_pool[layer_idx], value, start, n_new)
 
         return self.gather(layer_idx)
+
+    def _unshare_write_range(self, start: int, n_new: int) -> None:
+        """Copy-on-write every shared block the range ``[start, start+n_new)`` will write into.
+
+        In practice this is at most one block -- the partially-filled tail a fork left behind.
+        Full blocks are never rewritten, and blocks allocated by this very ``append`` are private
+        by construction. But the range is walked rather than assumed, because "at most one" is a
+        property of the current append pattern, not an invariant of the class.
+
+        **The content copy is the part that is easy to omit.** ``BlockTable.unshare`` allocates a
+        fresh block and repoints the mapping; without copying the old block's KV into it, the
+        sequence keeps a valid-looking mapping to a block full of zeros, and the answer degrades
+        rather than crashing.
+
+        Done at layer 0 for every layer's pool at once. Doing it per layer would leave layers 1..N
+        pointing at the old block while layer 0 points at the new one.
+        """
+        if not self.table.blocks:
+            return
+
+        block_size = self.allocator.block_size
+        first = start // block_size
+        last = (start + n_new - 1) // block_size
+
+        for logical in range(first, last + 1):
+            copied = self.table.unshare(logical)
+            if copied is None:
+                continue
+            old, new = copied
+            for layer in range(self.spec.n_layers):
+                self.key_pool[layer][new].copy_(self.key_pool[layer][old])
+                self.value_pool[layer][new].copy_(self.value_pool[layer][old])
 
     # --- block-level primitives ---------------------------------------------------------------
 
