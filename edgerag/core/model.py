@@ -174,14 +174,25 @@ def encode_images_chunked(
     real[0] |= ~torch.any(real)
     flat = flat[real].contiguous()
 
+    patch_size = vision_model.config.patch_size
+
     outputs = []
     for start in range(0, flat.shape[0], chunk_size):
         chunk = flat[start : start + chunk_size]
-        patch_mask = torch.ones(
+        # The tower wants a mask at PATCH resolution, not pixel resolution. HF builds a pixel-level
+        # mask and unfolds it; passing the pixel mask straight through gives a (n, H, W) tensor
+        # where a (n, H/p, W/p) one is expected, and the failure is an IndexError deep inside the
+        # embedding layer. See BUGS.md B-04. Mirroring HF's unfold keeps the two in step even if
+        # the image dimension is not an exact multiple of the patch size.
+        pixel_mask = torch.ones(
             (chunk.shape[0], chunk.shape[2], chunk.shape[3]),
             dtype=torch.bool,
             device=chunk.device,
         )
+        subgrid = pixel_mask.unfold(dimension=1, size=patch_size, step=patch_size)
+        subgrid = subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
+        patch_mask = (subgrid.sum(dim=(-1, -2)) > 0).bool()
+
         hidden = vision_model(chunk, patch_attention_mask=patch_mask).last_hidden_state
         outputs.append(connector(hidden))
 

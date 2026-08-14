@@ -414,8 +414,24 @@ than all 65 at once, bounding peak activation at the cost of some GPU parallelis
   75.4%, and would weaken the Phase 4 result to fix a memory problem that chunking solves for free.
 
 **Why it is free:** each sub-image passes through the ViT independently — there is no
-cross-sub-image attention in the tower. Chunking is therefore *exactly* equivalent, not an
-approximation, and the equivalence is testable (identical embeddings, any chunk size).
+cross-sub-image attention in the tower. Chunking is therefore mathematically equivalent, not an
+approximation.
+
+> **Verified and refined 2026-08-10** (`tests/test_equivalence.py`). **"Exactly equivalent" above
+> was overstated.** Chunking agrees with unchunked encoding to **~5e-06**, not bit-exactly: a
+> chunk holding a *single* image takes a different GEMM path from a batched one, so reduction
+> order and fp32 rounding differ. Any input whose sub-image count is not a multiple of the chunk
+> size ends with exactly such a chunk. Same effect as `CACHE_ATOL`.
+>
+> **I got this wrong twice before getting it right.** A first run on a large image appeared
+> bit-exact for chunk sizes ≥3, and I wrote that down as a property — it was a coincidence of an
+> input that happened to divide evenly. A smaller image produced a trailing batch-1 chunk and the
+> claim collapsed. Reading agreement on one input as a guarantee is precisely the mistake the
+> tolerance bands exist to prevent, and it is the second overclaim of bit-exactness in this phase.
+>
+> The claim also went **unverified from Phase 2 until Phase 4**, and the function it describes was
+> broken the whole time (`BUGS.md` B-04). An untested assertion in a decision log is a liability,
+> not a record.
 
 **Implementation:** Phase 2, alongside the forward pass. Chunk size becomes a config knob and gets
 a memory-vs-prefill-latency sweep in Phase 8.

@@ -107,6 +107,18 @@ Cells 1–4 above are identical (check the GPU, mount Drive, clone, rebuild corp
 fingerprint must still read `94b148a0b9f5006e`** — if it does not, the workload changed and
 nothing here is comparable to session 1.
 
+### Cell 4b — pull, if the runtime survived from an earlier session
+
+```python
+%cd /content/edgerag
+!git pull --ff-only
+```
+
+`git clone` in cell 3 is a no-op when `/content/edgerag` already exists, so a runtime that has
+been alive since an earlier session is pinned to whatever commit it cloned. The symptom is
+`No module named scripts.<something>` for a script added since — which reads like a broken command
+rather than a stale checkout. Run this before the cells below.
+
 Then run these three. Budget ~35 min total; the ordering puts the cheapest and most valuable
 first, so a disconnect costs the least.
 

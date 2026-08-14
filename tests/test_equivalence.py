@@ -30,7 +30,12 @@ import torch
 from edgerag.cache.naive import NaiveKVCache
 from edgerag.core.layers import build_causal_mask, repeat_kv
 from edgerag.core.loader import FIXTURE_MODEL
-from edgerag.core.model import EdgeRagDecoder, load_from_hf
+from edgerag.core.model import (
+    EdgeRagDecoder,
+    encode_images_chunked,
+    load_from_hf,
+    merge_image_features,
+)
 from edgerag.core.spec import ModelSpec
 
 #: Same-shape comparisons (our prefill vs HF prefill) are bit-identical in fp32. 1e-6 leaves room
@@ -407,6 +412,123 @@ def test_cache_reports_reservation_versus_use(hf_bundle) -> None:
         cache.update(k, k, layer)
 
     assert cache.used_bytes() / cache.nbytes == pytest.approx(300 / 2048, abs=1e-3)
+
+
+# --- vision tower (BUGS.md B-04) ----------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def image_batch(hf_bundle):
+    """One real image through the real processor.
+
+    Real, because synthetic *pixel* tensors would not have caught B-04 -- that bug was in mask
+    construction, which depends on the processor's actual output shapes and sub-image splitting.
+
+    Deliberately small (640x480, so few sub-images). The vision tower is the most expensive thing
+    in the suite by a wide margin: a 900x1200 page splits into ~16 sub-images of 1024 patches
+    each, and a 12-layer ViT over 16k tokens in fp32 on CPU takes minutes. A suite that takes ten
+    minutes stops being run every commit, which is the same argument D4 makes for the 256M
+    fixture in the first place.
+    """
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    processor = transformers.AutoProcessor.from_pretrained(FIXTURE_MODEL)
+    image = Image.new("RGB", (640, 480), color=(30, 60, 90))
+    messages = [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "what?"}]}
+    ]
+    prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
+    batch = processor(text=prompt, images=[image], return_tensors="pt")
+    image.close()
+    return batch
+
+
+@pytest.fixture(scope="module")
+def unchunked_features(hf_bundle, image_batch):
+    """Encode once, unchunked, and reuse as the reference for every chunk-size case."""
+    model, _, _, _ = hf_bundle
+    with torch.inference_mode():
+        return encode_images_chunked(model, image_batch["pixel_values"], chunk_size=4096)
+
+
+def test_chunked_vision_encoding_matches_huggingface(hf_bundle, image_batch) -> None:
+    """Our chunked tower must equal HF's ``get_image_features``.
+
+    This test did not exist until the function failed on its first real use (``BUGS.md`` B-04).
+    Nothing in the local suite passed real images through the vision path, so a mask-shape bug
+    shipped and was found on a T4 after a 9 GB download.
+
+    Compared at ``CACHE_ATOL``, not bit-exactly, and the reason is worth stating: whenever the
+    sub-image count is not a multiple of the chunk size, the final chunk is smaller -- and a
+    chunk holding a *single* image takes a different GEMM path from a batched one, shifting fp32
+    rounding by ~5e-06. That is the same effect ``CACHE_ATOL`` documents for the KV cache.
+    Whether any given input happens to divide evenly is not a property to design around.
+    """
+    model, _, _, _ = hf_bundle
+    pixel_values = image_batch["pixel_values"]
+
+    with torch.inference_mode():
+        expected = model.model.get_image_features(pixel_values).pooler_output
+        actual = encode_images_chunked(model, pixel_values, chunk_size=4)
+
+    assert actual.shape == expected.shape
+    torch.testing.assert_close(actual, expected, atol=CACHE_ATOL, rtol=CACHE_RTOL)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 8])
+def test_chunk_size_does_not_change_the_result(
+    hf_bundle, image_batch, unchunked_features, chunk_size
+) -> None:
+    """D12 claims chunking is equivalent, not an approximation. Verified here, with a caveat.
+
+    It holds because no attention crosses sub-image boundaries inside the tower. But *"it should"*
+    and *"it does"* are different statements and only one is a test -- and running the test twice,
+    on different images, refined the claim twice.
+
+    Chunking is **mathematically** equivalent and agrees to ~5e-06, not bit-exactly. A chunk
+    holding a single image takes a different GEMM path from a batched one, so reduction order and
+    fp32 rounding differ. Any input whose sub-image count is not a multiple of the chunk size ends
+    with such a chunk.
+
+    A first run on a larger image *appeared* bit-exact at chunk sizes >= 3 -- that image simply
+    divided evenly and produced no batch-1 remainder. Reading agreement as a property when it was
+    a coincidence of one input is exactly the mistake ``CACHE_ATOL`` exists to prevent.
+    """
+    model, _, _, _ = hf_bundle
+    with torch.inference_mode():
+        chunked = encode_images_chunked(model, image_batch["pixel_values"], chunk_size=chunk_size)
+
+    # 1e-4 is four orders above the measured 5e-06 and far below anything a real bug produces.
+    torch.testing.assert_close(chunked, unchunked_features, atol=CACHE_ATOL, rtol=CACHE_RTOL)
+
+
+def test_image_features_count_matches_the_image_token_slots(
+    hf_bundle, image_batch, unchunked_features
+) -> None:
+    """The invariant that catches P-11 and P-26 before they corrupt an answer.
+
+    If the tower returns a different number of features than the prompt has ``<image>`` slots,
+    every embedding after the mismatch shifts by one and the model answers confidently wrong.
+    """
+    _, spec, _, _ = hf_bundle
+    n_slots = int((image_batch["input_ids"] == spec.image_token_id).sum())
+    assert unchunked_features.shape[0] * unchunked_features.shape[1] == n_slots
+
+
+def test_merge_rejects_a_feature_count_mismatch(
+    hf_bundle, image_batch, unchunked_features
+) -> None:
+    """The guard fires loudly rather than silently shifting embeddings."""
+    _, spec, device, dtype = hf_bundle
+    input_ids = image_batch["input_ids"]
+    embeds = torch.zeros(
+        input_ids.shape[0], input_ids.shape[1], spec.hidden_size, dtype=dtype, device=device
+    )
+
+    with pytest.raises(ValueError, match="image features"):
+        merge_image_features(input_ids, embeds, unchunked_features[:-1], spec.image_token_id)
 
 
 def test_decoder_rejects_both_ids_and_embeds(hf_bundle) -> None:

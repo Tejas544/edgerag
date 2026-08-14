@@ -69,6 +69,55 @@ be validated by "it ran." It needs a *coverage* assertion at the call site. This
 to the Phase 3 allocator, where `free()` on an already-free block is the same shape of bug —
 plausible state, no exception, wrong answer.
 
+### B-04 · Chunked vision encoding was never called by any test, and was broken · 2026-08-10 · Phase 4
+
+**Symptom:** `IndexError: The shape of the mask [8, 147456] at index 1 does not match the shape of
+the indexed tensor [8, 729] at index 1`, raised on a Colab T4 **after a 9 GB model download**, on
+the first real invocation of a function written two phases earlier.
+
+**Root cause:** `encode_images_chunked` passed a **pixel-resolution** mask (384×384 = 147,456)
+where the vision tower expects a **patch-resolution** one (27×27 = 729). HuggingFace's own
+`get_image_features` builds the pixel mask and then *unfolds* it by `patch_size` to get the patch
+grid; I built the pixel mask and passed it straight through, skipping the unfold.
+
+**Why it survived 267 tests:** **nothing in the suite ever called it.** The local tests build
+synthetic token ids and never pass a real image through the vision path, so the entire function
+was dead code as far as CI was concerned. It was written in Phase 2 to implement `CONTEXT.md` D12
+and first executed in Phase 4, on the user's GPU quota.
+
+**Fix:** mirror HF's `unfold(dim=1, size=p, step=p).unfold(dim=2, size=p, step=p).sum(...) > 0`.
+Using the same construction rather than `H // p` also keeps the two in step when the image
+dimension is not an exact multiple of the patch size — 384/14 is 27.4, and both forms happen to
+give 27 here, but only one of them is guaranteed to keep matching.
+
+**Prevention — three tests that should have existed since Phase 2:**
+- our chunked encoding equals HF's `get_image_features` **bit-exactly**;
+- chunk size does not change the result (this is D12's whole claim, previously unverified);
+- the number of image features equals the number of `<image>` token slots, which is the cheap
+  invariant that also catches `P-11` and `P-26`.
+
+**It also corrected a claim — twice, which is the instructive part.** D12 said chunking was
+*"exactly equivalent"*. The first test run, on a large image, appeared to confirm bit-exactness
+for chunk sizes ≥3, and I wrote that down as a property. A smaller image then produced a trailing
+**batch-1 chunk**, which takes a different GEMM path, and the claim collapsed at ~5e-06.
+
+The correct statement is: chunking is *mathematically* equivalent and agrees to ~5e-06. Any input
+whose sub-image count is not a multiple of the chunk size ends with a partial chunk, so
+bit-exactness was never a property — it was a coincidence of one input that happened to divide
+evenly. See also `P-28`, which is why the same test then failed only under system load.
+
+**Cost:** one wasted T4 session and a 9 GB download — the user's scarce free-tier quota, which is
+the expensive part.
+
+**The transferable lesson, and it is the sharpest one so far:** a decision log entry asserting
+*"chunking is exactly equivalent"* is worthless if nothing executes the code it describes. Test
+count is not coverage. Before this, three separate documents (D12, the module docstring, the
+commit message) all confidently described the behaviour of a function that had never once run.
+**Any code path whose only caller lives in a script rather than a test is untested**, however
+carefully it is documented.
+
+---
+
 ### B-03 · Forked sequences overwrote each other's KV — refcounts were right, data was not · 2026-08-10 · Phase 3c
 
 **Symptom:** none visible in the test suite. 53 paged-cache tests passed, including every fork and
@@ -317,15 +366,33 @@ the skip list is itself an interview answer.
 reason SmoothQuant/AWQ exist. Expect it; if you see it, you've independently rediscovered a real
 result — say so.
 
-**P-27 · The test suite itself is a memory hog and crashed once.** ⚠️ *observed 2026-08-10, not
-yet reproduced* — one full-suite run died mid-collection with a fatal interpreter error; three
-subsequent runs passed. Three test modules now each hold a module-scoped model fixture
-(`test_equivalence` loads fp32-CPU *and* fp16-CUDA, `test_paged` and `test_fastv` one each), so a
-single session can hold four copies of the fixture model on a 4 GiB card and a memory-constrained
-host. *Symptom:* a crash with no failing test, which reads as flaky infrastructure and gets
-ignored. *If it recurs:* consolidate the fixtures into one session-scoped bundle rather than
-raising the machine's limits. Recorded now because "it passed on the retry" is how a real
-resource bug gets buried.
+**P-27 · The test suite is slow and holds four model copies.** Three modules each keep a
+module-scoped model fixture (`test_equivalence` holds fp32-CPU *and* fp16-CUDA; `test_paged` and
+`test_fastv` one each). One full-suite run died with a fatal interpreter error and retries passed.
+Separately, the vision tests pushed the suite past ten minutes until they were cut to one small
+image and two chunk sizes. *If it recurs:* consolidate into one session-scoped bundle rather than
+raising the machine's limits. A suite slow enough to skip is a suite that stops catching things —
+the same argument D4 makes for using the 256M fixture at all.
+
+**P-28 · fp32 CPU results are not bit-reproducible across machine load.** ⚠️ *diagnosed 2026-08-10*
+Five vision tests passed when their module ran alone and failed in the full suite, at a 1e-6
+tolerance, by ~5e-06. The tempting reading was memory pressure (P-27); it was not.
+
+CPU GEMM reduction order depends on how many threads the kernel is dispatched across, and that
+varies with system load. A comparison whose two sides use the **same** tensor shapes is unaffected
+— both run under whatever configuration is current — which is why the Phase 2 prefill tests hold
+at 1e-6 indefinitely. A comparison across **different** shapes (chunked vs unchunked encoding,
+many small GEMMs vs one large one) picks different kernels on each side, and the gap between them
+moves with load.
+
+*The rule this yields:* `EXACT_ATOL` (1e-6) is valid only when both sides of a comparison have
+identical tensor shapes. Anything crossing a shape boundary — cached decode vs full prefill,
+chunked vs unchunked, paged vs naive — belongs at `CACHE_ATOL` (1e-4). That was already the rule
+for the KV cache; the vision path simply had not been classified yet.
+
+*Why it presented as flakiness:* a tolerance that is marginally too tight passes on an idle
+machine and fails on a busy one, which looks like nondeterminism and invites a retry rather than a
+diagnosis.
 
 **P-26 · An all-black page is indistinguishable from a padding sub-image.** `get_image_features`
 identifies padding as "every pixel is 0.0" and drops those images before the tower. A genuinely
