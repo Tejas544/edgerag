@@ -201,7 +201,36 @@ fragmentation % · **gather overhead as a fraction of decode time** (this is wha
 
 ---
 
-## Phase 5 — Continuous batching · Aug 16 · ~5 hrs
+## Phase 5 — Continuous batching · **NEXT** · ~6 hrs
+
+Splits the same way Phase 4 did: **logic and correctness are local, every number is T4.**
+
+| step | what | where | gate |
+|---|---|---|---|
+| **5a** | `Request` state machine + scheduler loop. Pure logic, no GPU, property-tested like the allocator. | local | randomized admit/evict/complete sequences preserve invariants |
+| **5b** | **Batched paged decode.** `PagedKVCache` currently *raises* for batch > 1 — this is the real implementation work. N sequences, N block tables, one forward. | local | batched decode == N separate single-sequence decodes, fp32 |
+| **5c** | **Chunked prefill.** The fix for D14's 25 s TTFT at batch 4. | local | chunked prefill logits == full prefill logits, fp32 |
+| **5d** | Admission control on the free-block watermark, **reserving CoW headroom** (P1), plus preemption wiring with a failing `swap_in` path (D16). | local | pool conservation across a randomized load soak |
+| **5e** | Poisson replay of the frozen trace; throughput and p99 TTFT vs concurrency. | **T4** | the tradeoff plot |
+
+**Predictions to record before measuring, so the result can disagree with me:**
+
+- **Throughput will not improve much.** D14 measured aggregate throughput rising only 1.32× for
+  4× batch, because the 2.2B is MHA and decode is KV-bandwidth-bound. A scheduler cannot recover
+  bandwidth. **The deliverable is the tradeoff curve, not a multiple** — and `01_EDGERAG.md` §6's
+  5–11× target is not reachable on this model, which should be said before it is asked.
+- **Batched gather may partly cancel the batching win.** Sequences of different lengths must be
+  padded to the batch maximum in the gathered buffer, and padding is wasted bandwidth in exactly
+  the regime that is already the bottleneck. If measured, this argues for length-bucketed
+  admission — which is also the residual half of the withdrawn P5.
+- **Chunked prefill should be the visible win**, on p99 TTFT rather than throughput.
+
+**Cut line if time runs short:** 5e's Poisson harness before 5c's chunked prefill. A correct
+scheduler with a measured TTFT problem is a better result than an unmeasured scheduler.
+
+---
+
+## Phase 5 (original outline) — Aug 16 · ~5 hrs
 
 - Iteration-level scheduling; admit at every decode step.
 - **Chunked prefill.** Not in the spec, and it matters: without it, one long retrieved-context
