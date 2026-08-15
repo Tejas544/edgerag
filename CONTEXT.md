@@ -775,6 +775,42 @@ late tokens are the most recently retrieved document. Both modes go in the ablat
 
 ---
 
+## D18 · Chunked prefill trades numerical drift for TTFT, and the drift is measurable · **MEASURED** · 2026-08-11
+
+Chunked prefill is the fix for D14's 25-second TTFT at batch 4: a 6,800-token prompt is processed
+in slices across iterations instead of monopolising the GPU while every decoding request stalls
+(`BUGS.md` P-18).
+
+It is mathematically exact and numerically is not, and the pattern is clean. 40-token prompt,
+fp32, vs a single full prefill:
+
+| chunks | max abs Δ logits |
+|---:|---:|
+| **1** | **0.000e+00** |
+| 2–3 | 4.3e-05 |
+| 6 | 1.6e-04 |
+| 40 | 9.1e-04 |
+
+Single-chunk is **bit-identical**, as is paged-vs-naive single-shot — so the logic is right. Every
+additional chunk boundary changes a GEMM shape, and the rounding compounds through 30 layers.
+Greedy tokens are identical at every chunk size tested.
+
+**Two consequences:**
+
+1. **A flat tolerance is wrong for this comparison.** `tests/test_batched.py` scales it with chunk
+   count (`5e-5 × n_chunks`) and asserts single-chunk exactness separately. A flat band is either
+   too loose to catch a real bug at 2 chunks or too tight to pass at 40.
+2. **Chunk size is a three-way tradeoff, not a two-way one.** Smaller chunks give finer
+   scheduling granularity and lower p99 TTFT, but cost more numerical drift *and* more Python-side
+   iteration overhead. The default of 512 sits far from the noisy end — 6,800 tokens is ~14
+   chunks, well inside the band where drift is ~1e-4 on fp32 logits and invisible to greedy
+   decoding.
+
+**Worth stating unprompted:** "chunking the prefill changes the logits in the last decimal places,
+and here is the measured curve" is a stronger answer than asserting it is free.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
