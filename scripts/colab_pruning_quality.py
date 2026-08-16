@@ -25,6 +25,7 @@ Two controls, both necessary:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 import time
@@ -150,6 +151,22 @@ def generate(
     }
 
 
+def _free_duplicate_hf_decoder(hf_model: torch.nn.Module) -> None:
+    """Drop HuggingFace's text decoder once its weights have been copied into ours.
+
+    Deliberately surgical: ``vision_model`` and ``connector`` must survive, because
+    ``encode_images_chunked`` still runs them (``CONTEXT.md`` D2). Everything else in the HF tree
+    is now a second copy of weights we own.
+    """
+    inner = getattr(hf_model, "model", hf_model)
+    for owner, name in ((inner, "text_model"), (hf_model, "lm_head")):
+        if hasattr(owner, name):
+            delattr(owner, name)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Phase 4 quality curve (T4)")
     parser.add_argument("--drive", default="")
@@ -189,6 +206,18 @@ def main(argv: list[str] | None = None) -> int:
     lm = load_model(args.model, device="cuda", dtype=torch.float16)
     decoder = load_from_hf(lm.spec, lm.model)
 
+    # `load_from_hf` COPIES the decoder weights into ours, so from here the HF text decoder and
+    # lm_head are duplicates -- roughly 3.6 GiB of a 14.6 GiB card held for nothing. Keeping both
+    # is why every request OOM'd even after the per-request pool was fixed (BUGS.md B-05).
+    # Per CONTEXT.md D2 the only things still needed from HF are the vision tower and connector.
+    _free_duplicate_hf_decoder(lm.model)
+
+    if torch.cuda.is_available():
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(f"after load: {reserved:.2f} GiB reserved of {total:.2f} GiB "
+              f"({total - reserved:.2f} GiB free for cache and activations)")
+
     out_dir = Path(args.drive) if args.drive else (REPO_ROOT / "results")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "pruning_quality.jsonl"
@@ -225,6 +254,21 @@ def main(argv: list[str] | None = None) -> int:
                     oom_count += 1
                     cache.reset()
                     torch.cuda.empty_cache()
+                    # Bail on the first config that cannot fit a single request. If request 1
+                    # OOMs, so will requests 2..60 and every later config -- continuing just
+                    # spends 25 minutes of scarce T4 quota proving it 660 times. Two OOMs in a
+                    # row with nothing scored means the configuration is wrong, not the data.
+                    if oom_count >= 2 and not scores:
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                        print(
+                            f"\nABORTING: the first {oom_count} requests both ran out of memory, "
+                            f"so nothing will fit. {reserved:.2f} GiB reserved of {total:.2f}. "
+                            "Reduce --num-blocks or --n-queries, or check that the duplicate HF "
+                            "decoder was freed. Not spending the rest of the session on this.",
+                            file=sys.stderr,
+                        )
+                        return 1
                     continue
                 scores.append(anls(text, entry.answers))
                 savings.append(stats["mib_reclaimed"])

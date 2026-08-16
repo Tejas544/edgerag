@@ -99,7 +99,22 @@ through one cache, asserting tokens were produced, pruning dropped something, an
 leak. `torch.cuda.synchronize()` became `sync()` so the path is runnable on CPU and therefore
 testable at all.
 
-**Cost:** one full T4 session, ~25 minutes of scarce free-tier quota, plus a 9 GB download.
+**Second round, 2026-08-11 — the fix was incomplete and cost another session.** With the pool
+allocated once, every request still OOM'd. The larger duplication was upstream of it:
+`load_model` holds HuggingFace's full model (**4.18 GiB**) and `load_from_hf` then *copies* the
+decoder weights into ours (**~3.6 GiB**). Both stayed resident — ~7.8 GiB of a 14.6 GiB card
+before a single block was allocated. Per `CONTEXT.md` D2 the only things still needed from HF
+after the copy are the vision tower and connector, so the text decoder and `lm_head` are now freed
+explicitly. The script also prints reserved-vs-total memory after load, so the headroom is visible
+rather than inferred from a wall of OOMs.
+
+**And the abort condition was wrong.** Skipping a failed request is right for an occasional
+outlier; it is wrong when *nothing* fits. Two consecutive OOMs with nothing yet scored now aborts
+the run — if request 1 cannot fit, neither can requests 2–60 or any later config, and continuing
+spends 25 minutes of scarce quota proving it 660 times. The original loop's politeness was
+indistinguishable from progress.
+
+**Cost:** two full T4 sessions, ~50 minutes of scarce free-tier quota, plus a 9 GB download.
 
 **The transferable lesson:** this is `B-04` again — a script-only code path with no test — but with
 a sharper edge. B-04 *crashed*, which is self-announcing. B-05 produced **a plausible file of
