@@ -1,3 +1,125 @@
+# Fresh session, start to finish
+
+Use this when starting on a **new Google account** or an entirely new runtime — nothing from a
+previous session carries over, including the Drive folder.
+
+Ordering is deliberate: **cheapest and most valuable first**, so a disconnect costs the least.
+The gather measurement needs neither the corpus nor the model weights, so it runs in two minutes
+before anything is downloaded. The smoke test costs one extra minute and has caught a failure
+that would otherwise have wasted twenty-five.
+
+### 0 · Switch to a GPU runtime — before anything else
+
+Runtime → Change runtime type → **T4 GPU** → Save.
+
+A CPU runtime shows only "System RAM" and "Disk"; a T4 session adds a **GPU RAM** bar. Every
+script below refuses to record a number on anything but a T4, so getting this wrong fails fast
+rather than producing unpublishable results.
+
+### 1 · Confirm what you got
+
+```python
+!nvidia-smi --query-gpu=name,memory.total --format=csv
+```
+
+Must say **Tesla T4**. If it says anything else, change the runtime and try again.
+
+### 2 · Mount Drive
+
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p /content/drive/MyDrive/edgerag
+```
+
+A new account will prompt for authorisation. Results are fsync'd here after every measurement, so
+a disconnect costs one measurement rather than the session.
+
+### 3 · Clone and install
+
+```python
+!git clone https://github.com/Tejas544/edgerag.git /content/edgerag
+%cd /content/edgerag
+!pip install -q -e . 2>&1 | tail -3
+```
+
+If `/content/edgerag` already exists, `git clone` silently does nothing — run
+`!cd /content/edgerag && git pull --ff-only` instead, or the session stays pinned to an old commit
+and new scripts fail with `No module named scripts.<x>`.
+
+### 4 · Gather overhead — 2 min, no weights, no corpus
+
+```python
+!python -m scripts.colab_gather_overhead --drive /content/drive/MyDrive/edgerag
+```
+
+Runs from the model config alone with synthetic KV, because gather cost depends on tensor shape
+and memory layout, not on values. Answers `CONTEXT.md` D3 and prices the head-major pool change.
+
+**Read the last line.** The previous T4 run put the gather at **77.6%** of the paged attention
+path; the layout change should have cut it substantially. If it is still far above 25%, a fused
+kernel stops being optional.
+
+### 5 · Corpus and frozen trace — ~6 min, CPU only
+
+```python
+!python -m scripts.build_corpus --infographic 250 --docvqa 400
+!python -m scripts.build_trace --k 5
+```
+
+Corpus images are ~1 GB and not in git, so they are rebuilt from the same deterministic stream.
+**The fingerprint must read `94b148a0b9f5006e`.** If it does not, the workload is not the one every
+other number was measured against — stop and report it rather than continuing.
+
+No GPU time is spent here, so a disconnect during setup costs no quota.
+
+### 6 · Smoke test the quality run — ~1 min after the download
+
+```python
+!python -m scripts.colab_pruning_quality --drive /content/drive/MyDrive/edgerag \
+    --n-queries 2 --keep-ratios 1.0 --strategies attention
+```
+
+Two requests at `keep_ratio=1.0`, which is deliberately the **worst case**: nothing is pruned, so
+both halves of the cache hold the whole sequence and block demand peaks. If this passes, the full
+sweep will.
+
+Most of the minute is the 9 GB weight download, which the session then caches — so step 7 starts
+immediately.
+
+**What good looks like:** `after load:` around **4.4 GiB reserved of 14.56**, a `block pool:` line
+whose "worst case needs" is below the pool size, then a result line with **`n=2`**. If you see
+`ABORTING` or `n=0`, stop and send the output.
+
+### 7 · The full quality curve — ~20 min
+
+```python
+!python -m scripts.colab_pruning_quality --drive /content/drive/MyDrive/edgerag --n-queries 40
+```
+
+The half of Phase 4 that cannot be computed locally. One result line per configuration, roughly
+every two minutes. Two things to read:
+
+- **where the curve falls off** — the target is 50–75% of visual tokens removed while quality
+  holds;
+- **whether `attention` beats `uniform`** at the same ratio. If it does not, the honest finding is
+  *"visual tokens are redundant on this workload"*, not *"FastV works"* — a real result either
+  way, but a different one.
+
+### 8 · Bring it home
+
+```python
+%cd /content/edgerag
+!mkdir -p results
+!cp /content/drive/MyDrive/edgerag/*.json /content/drive/MyDrive/edgerag/*.jsonl results/
+!ls -la results/
+```
+
+Then download `results/` (or commit it) and say so — the numbers get folded into `CONTEXT.md` and
+the README.
+
+---
+
 # Running the baseline on Colab
 
 Paste these cells into a fresh notebook. Total GPU time: **~25–35 minutes**, most of it the
