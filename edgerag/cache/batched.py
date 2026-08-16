@@ -48,8 +48,9 @@ class BatchedPagedCache:
         self.device = device
         self.dtype = dtype
         self.sequences: list[PagedKVCache] = []
-        # One pool shared by every member, created once and handed to each sequence.
-        shape = (allocator.num_blocks, allocator.block_size, spec.n_kv_heads, spec.head_dim)
+        # One pool shared by every member, created once and handed to each sequence. Head-major,
+        # matching PagedKVCache -- see that module's docstring for why the ordering matters.
+        shape = (spec.n_kv_heads, allocator.num_blocks, allocator.block_size, spec.head_dim)
         self.key_pool = [
             torch.zeros(shape, dtype=dtype, device=device) for _ in range(spec.n_layers)
         ]

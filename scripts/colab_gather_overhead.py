@@ -136,6 +136,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--allow-untrusted-device", action="store_true")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing trusted (T4) result with an untrusted one. Rarely correct.",
+    )
     args = parser.parse_args(argv)
 
     info = assert_device_trusted(allow_untrusted=args.allow_untrusted_device)
@@ -170,8 +175,31 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.drive) if args.drive else (REPO_ROOT / "results")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "gather_overhead.json"
+
+    # Never let an untrusted run clobber a trusted one. The device gate stops unpublishable
+    # numbers being *produced*; without this it does nothing to stop them *replacing* real ones.
+    # Learned by overwriting a T4 result with a local GTX 1650 run that cost nothing to repeat --
+    # the T4 session it destroyed did not.
+    if out_path.exists() and not info.trusted and not args.force:
+        try:
+            existing = json.loads(out_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        if any(t in str(existing.get("device", "")) for t in ("Tesla T4",)):
+            print(
+                f"\nREFUSING to overwrite {out_path}: it holds a result from "
+                f"{existing['device']} and this run is on {info.name}, which is not publishable "
+                "(CONTEXT.md D4). Pass --force if you really mean to discard it, or --drive/-o "
+                "to write elsewhere.",
+                file=sys.stderr,
+            )
+            return 1
+
     out_path.write_text(
-        json.dumps({"device": info.name, "model": spec.model_id, "rows": rows}, indent=2),
+        json.dumps(
+            {"device": info.name, "trusted": info.trusted, "model": spec.model_id, "rows": rows},
+            indent=2,
+        ),
         encoding="utf-8",
     )
 

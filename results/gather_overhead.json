@@ -1,0 +1,208 @@
+{
+  "device": "Tesla T4",
+  "trusted": true,
+  "model": "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+  "note": "PRE-P6 baseline: token-major pool, two copies per gather. Transcribed from the T4 run output; canonical copy on Drive.",
+  "rows": [
+    {
+      "seq_len": 512,
+      "block_size": 8,
+      "gather_ms": 0.211,
+      "paged_attention_ms": 0.139,
+      "contiguous_attention_ms": 0.145,
+      "gather_fraction": 0.6028571428571429,
+      "step_gather_ms": 5.064,
+      "step_attention_ms": 3.3360000000000003
+    },
+    {
+      "seq_len": 2048,
+      "block_size": 8,
+      "gather_ms": 0.483,
+      "paged_attention_ms": 0.225,
+      "contiguous_attention_ms": 0.225,
+      "gather_fraction": 0.6822033898305085,
+      "step_gather_ms": 11.591999999999999,
+      "step_attention_ms": 5.4
+    },
+    {
+      "seq_len": 4096,
+      "block_size": 8,
+      "gather_ms": 0.79,
+      "paged_attention_ms": 0.263,
+      "contiguous_attention_ms": 0.253,
+      "gather_fraction": 0.7502374169040836,
+      "step_gather_ms": 18.96,
+      "step_attention_ms": 6.312
+    },
+    {
+      "seq_len": 6800,
+      "block_size": 8,
+      "gather_ms": 1.255,
+      "paged_attention_ms": 0.346,
+      "contiguous_attention_ms": 0.354,
+      "gather_fraction": 0.7838850718301061,
+      "step_gather_ms": 30.119999999999997,
+      "step_attention_ms": 8.303999999999998
+    },
+    {
+      "seq_len": 8192,
+      "block_size": 8,
+      "gather_ms": 1.474,
+      "paged_attention_ms": 0.465,
+      "contiguous_attention_ms": 0.415,
+      "gather_fraction": 0.7601856627127385,
+      "step_gather_ms": 35.376,
+      "step_attention_ms": 11.16
+    },
+    {
+      "seq_len": 512,
+      "block_size": 16,
+      "gather_ms": 0.192,
+      "paged_attention_ms": 0.177,
+      "contiguous_attention_ms": 0.175,
+      "gather_fraction": 0.5203252032520326,
+      "step_gather_ms": 4.6080000000000005,
+      "step_attention_ms": 4.247999999999999
+    },
+    {
+      "seq_len": 2048,
+      "block_size": 16,
+      "gather_ms": 0.412,
+      "paged_attention_ms": 0.188,
+      "contiguous_attention_ms": 0.189,
+      "gather_fraction": 0.6866666666666666,
+      "step_gather_ms": 9.888,
+      "step_attention_ms": 4.5120000000000005
+    },
+    {
+      "seq_len": 4096,
+      "block_size": 16,
+      "gather_ms": 0.797,
+      "paged_attention_ms": 0.238,
+      "contiguous_attention_ms": 0.231,
+      "gather_fraction": 0.7700483091787439,
+      "step_gather_ms": 19.128,
+      "step_attention_ms": 5.712
+    },
+    {
+      "seq_len": 6800,
+      "block_size": 16,
+      "gather_ms": 1.214,
+      "paged_attention_ms": 0.357,
+      "contiguous_attention_ms": 0.362,
+      "gather_fraction": 0.772756206238065,
+      "step_gather_ms": 29.136,
+      "step_attention_ms": 8.568
+    },
+    {
+      "seq_len": 8192,
+      "block_size": 16,
+      "gather_ms": 1.427,
+      "paged_attention_ms": 0.412,
+      "contiguous_attention_ms": 0.427,
+      "gather_fraction": 0.7759651984774334,
+      "step_gather_ms": 34.248000000000005,
+      "step_attention_ms": 9.888
+    },
+    {
+      "seq_len": 512,
+      "block_size": 32,
+      "gather_ms": 0.147,
+      "paged_attention_ms": 0.129,
+      "contiguous_attention_ms": 0.13,
+      "gather_fraction": 0.5326086956521738,
+      "step_gather_ms": 3.5279999999999996,
+      "step_attention_ms": 3.096
+    },
+    {
+      "seq_len": 2048,
+      "block_size": 32,
+      "gather_ms": 0.397,
+      "paged_attention_ms": 0.161,
+      "contiguous_attention_ms": 0.16,
+      "gather_fraction": 0.7114695340501792,
+      "step_gather_ms": 9.528,
+      "step_attention_ms": 3.864
+    },
+    {
+      "seq_len": 4096,
+      "block_size": 32,
+      "gather_ms": 0.741,
+      "paged_attention_ms": 0.226,
+      "contiguous_attention_ms": 0.23,
+      "gather_fraction": 0.766287487073423,
+      "step_gather_ms": 17.784,
+      "step_attention_ms": 5.424
+    },
+    {
+      "seq_len": 6800,
+      "block_size": 32,
+      "gather_ms": 1.193,
+      "paged_attention_ms": 0.35,
+      "contiguous_attention_ms": 0.355,
+      "gather_fraction": 0.7731691510045365,
+      "step_gather_ms": 28.632,
+      "step_attention_ms": 8.399999999999999
+    },
+    {
+      "seq_len": 8192,
+      "block_size": 32,
+      "gather_ms": 1.43,
+      "paged_attention_ms": 0.419,
+      "contiguous_attention_ms": 0.437,
+      "gather_fraction": 0.7733910221741481,
+      "step_gather_ms": 34.32,
+      "step_attention_ms": 10.056
+    },
+    {
+      "seq_len": 512,
+      "block_size": 64,
+      "gather_ms": 0.147,
+      "paged_attention_ms": 0.136,
+      "contiguous_attention_ms": 0.133,
+      "gather_fraction": 0.5194346289752649,
+      "step_gather_ms": 3.5279999999999996,
+      "step_attention_ms": 3.2640000000000002
+    },
+    {
+      "seq_len": 2048,
+      "block_size": 64,
+      "gather_ms": 0.404,
+      "paged_attention_ms": 0.155,
+      "contiguous_attention_ms": 0.157,
+      "gather_fraction": 0.7227191413237924,
+      "step_gather_ms": 9.696000000000002,
+      "step_attention_ms": 3.7199999999999998
+    },
+    {
+      "seq_len": 4096,
+      "block_size": 64,
+      "gather_ms": 0.74,
+      "paged_attention_ms": 0.288,
+      "contiguous_attention_ms": 0.299,
+      "gather_fraction": 0.7198443579766537,
+      "step_gather_ms": 17.759999999999998,
+      "step_attention_ms": 6.911999999999999
+    },
+    {
+      "seq_len": 6800,
+      "block_size": 64,
+      "gather_ms": 1.192,
+      "paged_attention_ms": 0.353,
+      "contiguous_attention_ms": 0.357,
+      "gather_fraction": 0.7715210355987056,
+      "step_gather_ms": 28.607999999999997,
+      "step_attention_ms": 8.472
+    },
+    {
+      "seq_len": 8192,
+      "block_size": 64,
+      "gather_ms": 1.419,
+      "paged_attention_ms": 0.421,
+      "contiguous_attention_ms": 0.43,
+      "gather_fraction": 0.7711956521739131,
+      "step_gather_ms": 34.056,
+      "step_attention_ms": 10.104
+    }
+  ]
+}

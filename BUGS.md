@@ -69,6 +69,46 @@ be validated by "it ran." It needs a *coverage* assertion at the call site. This
 to the Phase 3 allocator, where `free()` on an already-free block is the same shape of bug —
 plausible state, no exception, wrong answer.
 
+### B-05 · The quality run scored zero requests and reported it as a result · 2026-08-11 · Phase 4
+
+**Symptom:** `results/pruning_quality.jsonl` came back complete and well-formed — 11 rows, every
+strategy and ratio present — with `anls: 0.0` and **`n_scored: 0`** on every one. A tidy file
+saying pruning destroys quality at every ratio, including the `keep=1.0` baseline that is proven
+bit-identical to no pruning at all.
+
+**Root cause:** `generate()` constructed its own `CompressedKVCache` with
+`BlockAllocator(num_blocks=1024, 16)`. At 192 KiB/token that pool is **3.2 GiB**, allocated fresh
+for each of 660 calls, on top of 4.18 GiB of weights. Every call raised `OutOfMemoryError`, the
+loop's `except ... : continue` swallowed it, and the aggregation divided by an empty list into
+zeros.
+
+**Two independent defects, and the second is the dangerous one:**
+
+1. The pool was allocated per request instead of once. Mechanical, easy to fix.
+2. **A run that measured nothing reported zeros instead of failing.** The output was
+   indistinguishable from a real measurement showing catastrophic quality loss. Had it been
+   trusted, the Phase 4 conclusion would have been "FastV destroys answer quality" — published,
+   wrong, and contradicted by the bit-identical baseline sitting in the same table.
+
+**Fix:** one pool for the whole run, reset between requests; default pool sized from the real
+workload (576 blocks ≈ 9,216 slots ≈ 1.8 GiB) rather than a round number; the script **exits
+non-zero** when nothing was scored, and warns per-row when coverage drops below half.
+
+**Prevention:** `tests/test_anls.py` now runs `generate()` end-to-end on the 256M fixture, twice
+through one cache, asserting tokens were produced, pruning dropped something, and the pool did not
+leak. `torch.cuda.synchronize()` became `sync()` so the path is runnable on CPU and therefore
+testable at all.
+
+**Cost:** one full T4 session, ~25 minutes of scarce free-tier quota, plus a 9 GB download.
+
+**The transferable lesson:** this is `B-04` again — a script-only code path with no test — but with
+a sharper edge. B-04 *crashed*, which is self-announcing. B-05 produced **a plausible file of
+zeros**. An aggregation over an empty set must be an error, never a number: `sum([])/max(len([]),1)`
+is the shape of a result that gets published. Any measurement script needs a "did I actually
+measure anything?" gate before it writes.
+
+---
+
 ### B-04 · Chunked vision encoding was never called by any test, and was broken · 2026-08-10 · Phase 4
 
 **Symptom:** `IndexError: The shape of the mask [8, 147456] at index 1 does not match the shape of

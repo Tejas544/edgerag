@@ -101,3 +101,73 @@ def test_score_is_bounded() -> None:
     cases = [("", ["x"]), ("x", [""]), ("abc", ["abc"]), ("zzz", ["abc"]), ("ab", ["abcdefgh"])]
     for prediction, answers in cases:
         assert 0.0 <= anls(prediction, answers) <= 1.0
+
+
+# --- the generation path (BUGS.md B-05) -----------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_generate_runs_end_to_end_on_the_fixture(tmp_path) -> None:
+    """Covers ``generate()`` itself, which no test touched until it failed on a T4.
+
+    B-05: it allocated a 3.2 GiB block pool *per request*, OOM'd on every call, and the caught
+    exception turned into a file of zeros. Both halves of that were invisible locally because the
+    only caller was a script. This runs the whole path -- processor, chunked vision encoding,
+    feature merge, compressor, paged decode -- on the 256M fixture at CPU/fp32.
+    """
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("PIL")
+    import torch
+    from PIL import Image
+
+    from edgerag.cache.allocator import BlockAllocator
+    from edgerag.cache.compressed import CompressedKVCache
+    from edgerag.compress.fastv import FastVConfig
+    from edgerag.core.loader import FIXTURE_MODEL
+    from edgerag.core.model import load_from_hf
+    from edgerag.core.spec import ModelSpec
+    from edgerag.retrieval.corpus import CorpusDoc
+    from edgerag.retrieval.trace import TraceEntry
+    from scripts.colab_pruning_quality import generate
+
+    config_obj = transformers.AutoConfig.from_pretrained(FIXTURE_MODEL)
+    config_obj._attn_implementation = "eager"
+    config_obj.text_config._attn_implementation = "eager"
+    hf = transformers.AutoModelForImageTextToText.from_pretrained(
+        FIXTURE_MODEL, config=config_obj, dtype=torch.float32
+    )
+    hf.eval()
+    processor = transformers.AutoProcessor.from_pretrained(FIXTURE_MODEL)
+    spec = ModelSpec.from_hf_config(FIXTURE_MODEL, config_obj)
+    decoder = load_from_hf(spec, hf)
+
+    image_path = tmp_path / "page.jpg"
+    Image.new("RGB", (480, 360), color=(200, 200, 200)).save(image_path, "JPEG")
+    doc = CorpusDoc(
+        doc_key="t:1:0", source="t", doc_id="1", page_no=0,
+        image_path=str(image_path), width=480, height=360, text="total is 42", n_text_chars=11,
+    )
+    entry = TraceEntry(
+        query_id="q1", question="What is the total?", answers=["42"],
+        gold_doc_key=doc.doc_key, retrieved_doc_keys=[doc.doc_key], split="heldout", k=1,
+    )
+
+    cache = CompressedKVCache(
+        spec, BlockAllocator(256, 16), torch.device("cpu"), torch.float32, score_layer=2
+    )
+
+    # Two requests through ONE cache: the reuse that B-05 got wrong.
+    for _ in range(2):
+        text, stats = generate(
+            decoder, hf, processor, spec, entry, {doc.doc_key: doc},
+            FastVConfig(keep_ratio=0.5, score_layer=2), "attention", 4,
+            torch.device("cpu"), cache,
+        )
+        assert isinstance(text, str)
+        assert stats["prefill_tokens"] > 0
+        assert stats["ttft_s"] > 0
+        assert stats["dropped_tokens"] > 0, "pruning did not drop anything"
+
+    # The pool must not leak across requests -- that is what per-request allocation hid.
+    cache.reset()
+    cache.allocator.check_invariants()

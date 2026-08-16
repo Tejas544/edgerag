@@ -15,9 +15,17 @@ buffer to ``num_tokens`` before returning it, so the padding slots are never han
 at all. That is a structural guarantee rather than a mask that has to be right -- and the boundary
 sweep in the tests exists to keep it that way.
 
-Pool layout is ``(num_blocks, block_size, kv_heads, head_dim)`` per layer. Chosen so that
-gathering is ``pool[block_ids]`` followed by a *free* reshape: the block and slot axes are already
-adjacent and contiguous, so flattening them copies nothing extra.
+Pool layout is ``(kv_heads, num_blocks, block_size, head_dim)`` per layer -- **head-major**, and
+that ordering is the whole point. Attention wants ``(1, kv_heads, seq, head_dim)``. With a
+head-major pool, ``pool[:, block_ids]`` produces exactly that shape once the block and slot axes
+are flattened, and the flatten is a **view**.
+
+The obvious token-major layout ``(num_blocks, block_size, kv_heads, head_dim)`` costs a second
+full copy: the gather is one copy, then ``.transpose(0, 1).contiguous()`` is another, because the
+head axis has to move. That is not a micro-optimisation -- measured on a T4, the gather is **77% of
+the paged attention path** (``CONTEXT.md`` D3), so halving its traffic is the single largest
+available win in decode. It was the original layout, chosen because the flatten looked free there
+too; only the measurement showed which of the two copies mattered.
 """
 
 from __future__ import annotations
@@ -58,7 +66,9 @@ class PagedKVCache:
         # never grow. See edgerag/cache/compressed.py.
         self.first_layer = first_layer
 
-        shape = (allocator.num_blocks, allocator.block_size, spec.n_kv_heads, spec.head_dim)
+        # Head-major: (kv_heads, num_blocks, block_size, head_dim). See the module docstring --
+        # this ordering removes a whole second copy from the gather.
+        shape = (spec.n_kv_heads, allocator.num_blocks, allocator.block_size, spec.head_dim)
         # Pools are shareable so several sequences can page into one physical arena -- the whole
         # point of the allocator. Phase 3c passes them in explicitly.
         self.key_pool = pool or [
@@ -150,8 +160,9 @@ class PagedKVCache:
                 continue
             old, new = copied
             for layer in range(self.spec.n_layers):
-                self.key_pool[layer][new].copy_(self.key_pool[layer][old])
-                self.value_pool[layer][new].copy_(self.value_pool[layer][old])
+                # Head-major pool: the block axis is 1, not 0.
+                self.key_pool[layer][:, new].copy_(self.key_pool[layer][:, old])
+                self.value_pool[layer][:, new].copy_(self.value_pool[layer][:, old])
 
     # --- block-level primitives ---------------------------------------------------------------
 
@@ -173,7 +184,9 @@ class PagedKVCache:
         block_of = block_ids[positions // self.allocator.block_size]
         offset_of = positions % self.allocator.block_size
 
-        pool[block_of, offset_of] = source[0].transpose(0, 1).to(pool.dtype)
+        # Head-major pool: index the block and slot axes, leaving heads leading. `source` is
+        # (1, kv_heads, n_new, head_dim), which already matches (kv_heads, n_new, head_dim).
+        pool[:, block_of, offset_of] = source[0].to(pool.dtype)
 
     def gather(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Reassemble the sequence's blocks into contiguous ``(1, kv_heads, seq_len, head_dim)``.
@@ -195,13 +208,16 @@ class PagedKVCache:
         return keys, values
 
     def _gather_pool(self, pool: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
-        # (n_blocks, block_size, kv_heads, head_dim) -- block and slot axes adjacent, so the
-        # flatten below is a view, not a copy.
-        blocks = pool[block_ids]
-        flat = blocks.reshape(-1, self.spec.n_kv_heads, self.spec.head_dim)
+        """One copy, not two.
+
+        ``pool[:, block_ids]`` gathers into ``(kv_heads, n_blocks, block_size, head_dim)``, which
+        is contiguous, so the flatten to ``(kv_heads, tokens, head_dim)`` is a **view** and the
+        leading ``unsqueeze`` is free. No transpose, and therefore no second ``contiguous()``.
+        """
+        blocks = pool[:, block_ids]
+        flat = blocks.reshape(self.spec.n_kv_heads, -1, self.spec.head_dim)
         # Drop the final block's slack *before* attention sees it. This is the P-01 guarantee.
-        flat = flat[: self.seq_len]
-        return flat.transpose(0, 1).unsqueeze(0).contiguous()
+        return flat[:, : self.seq_len].unsqueeze(0)
 
     # --- sharing (Phase 3c) -------------------------------------------------------------------
 

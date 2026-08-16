@@ -34,7 +34,7 @@ from typing import Any
 import torch
 from PIL import Image
 
-from bench.metrics import assert_device_trusted
+from bench.metrics import assert_device_trusted, sync
 from edgerag.cache.allocator import BlockAllocator
 from edgerag.cache.compressed import CompressedKVCache
 from edgerag.compress.fastv import FastVCompressor, FastVConfig, build_visual_mask
@@ -94,9 +94,15 @@ def generate(
     strategy: str,
     max_new_tokens: int,
     device: torch.device,
-    num_blocks: int,
+    cache: CompressedKVCache,
 ) -> tuple[str, dict[str, Any]]:
-    """Greedy decode one trace request under a pruning configuration."""
+    """Greedy decode one trace request under a pruning configuration.
+
+    ``cache`` is supplied by the caller and **reused across requests**. Constructing it here --
+    which is what this function did originally -- allocates a fresh block pool per request:
+    1024 blocks x 16 tokens x 192 KiB/token is **3.2 GiB**, on top of 4.18 GiB of weights, and it
+    OOM'd on every single call. See ``BUGS.md`` B-05.
+    """
     docs = [docs_by_key[k] for k in entry.retrieved_doc_keys if k in docs_by_key]
     images = [Image.open(REPO_ROOT / d.image_path).convert("RGB") for d in docs]
     prompt = processor.apply_chat_template(
@@ -114,16 +120,14 @@ def generate(
     embeds = merge_image_features(input_ids, embeds, features, spec.image_token_id)
     visual_mask = build_visual_mask(input_ids, spec.image_token_id)
 
-    cache = CompressedKVCache(
-        spec, BlockAllocator(num_blocks, 16), device, torch.float16, score_layer=config.score_layer
-    )
+    cache.reset()
     compressor = FastVCompressor(config, strategy=strategy) if config.enabled else None
 
     t0 = time.perf_counter()
     logits = decoder(
         inputs_embeds=embeds, cache=cache, compressor=compressor, visual_mask=visual_mask
     )
-    torch.cuda.synchronize()
+    sync()  # not torch.cuda.synchronize(): this must be runnable on CPU so a test can cover it
     ttft = time.perf_counter() - t0
 
     tokens: list[int] = []
@@ -139,7 +143,6 @@ def generate(
         next_id = int(step[0, -1].argmax())
 
     saving = cache.savings()
-    cache.free()
     return processor.tokenizer.decode(tokens, skip_special_tokens=True), {
         "ttft_s": ttft,
         "prefill_tokens": int(input_ids.shape[1]),
@@ -154,7 +157,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-queries", type=int, default=60)
     parser.add_argument("--max-new-tokens", type=int, default=24)
     parser.add_argument("--score-layer", type=int, default=2)
-    parser.add_argument("--num-blocks", type=int, default=1024)
+    parser.add_argument(
+        "--num-blocks",
+        type=int,
+        default=576,
+        help=(
+            "block pool size. 576 x 16 tokens = 9,216 slots ~= 1.8 GiB at 192 KiB/token, which "
+            "covers the longest observed prompt (~8k) plus generation. The pool is allocated ONCE "
+            "and reused; oversizing it wastes VRAM the model needs (BUGS.md B-05)."
+        ),
+    )
     parser.add_argument(
         "--keep-ratios", type=float, nargs="+", default=[1.0, 0.75, 0.5, 0.375, 0.25, 0.125]
     )
@@ -181,6 +193,18 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "pruning_quality.jsonl"
 
+    # One pool for the whole run. Allocated here, reset between requests.
+    cache = CompressedKVCache(
+        lm.spec,
+        BlockAllocator(args.num_blocks, 16),
+        lm.device,
+        torch.float16,
+        score_layer=args.score_layer,
+    )
+    print(f"block pool: {args.num_blocks} blocks x 16 tokens = "
+          f"{cache.full.allocator.num_blocks * 16:,} slots\n")
+
+    total_scored = 0
     for strategy in args.strategies:
         for ratio in args.keep_ratios:
             if ratio == 1.0 and strategy != args.strategies[0]:
@@ -189,19 +213,26 @@ def main(argv: list[str] | None = None) -> int:
                 keep_ratio=ratio, score_layer=args.score_layer, score_mode="last_row"
             )
             scores, savings, ttfts = [], [], []
+            oom_count = 0
 
             for entry in heldout:
                 try:
                     text, stats = generate(
                         decoder, lm.model, lm.processor, lm.spec, entry, docs_by_key,
-                        config, strategy, args.max_new_tokens, lm.device, args.num_blocks,
+                        config, strategy, args.max_new_tokens, lm.device, cache,
                     )
                 except torch.cuda.OutOfMemoryError:
+                    oom_count += 1
+                    cache.reset()
                     torch.cuda.empty_cache()
                     continue
                 scores.append(anls(text, entry.answers))
                 savings.append(stats["mib_reclaimed"])
                 ttfts.append(stats["ttft_s"])
+
+            total_scored += len(scores)
+            if oom_count:
+                print(f"    (skipped {oom_count}/{len(heldout)} requests: out of memory)")
 
             record = {
                 "strategy": strategy,
@@ -222,6 +253,28 @@ def main(argv: list[str] | None = None) -> int:
                   f"TTFT={record['ttft_s_mean']:.2f}s  (n={record['n_scored']})")
 
     print(f"\nwrote {out_path}")
+
+    # A run that scored nothing must FAIL, not emit a tidy file of zeros. The first version of
+    # this script OOM'd on every request, swallowed it, and wrote ANLS 0.0 across the board --
+    # a plausible-looking "quality curve" showing that pruning destroys quality. A result that is
+    # silently empty is more dangerous than a crash, because it gets published (BUGS.md B-05).
+    if total_scored == 0:
+        print(
+            "\nFAILED: not a single request was scored. Every one was skipped, so the numbers "
+            "above are zeros by default rather than by measurement. Do not use this file.",
+            file=sys.stderr,
+        )
+        return 1
+
+    expected = len(heldout)
+    for line in out_path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        if record["n_scored"] < expected * 0.5:
+            print(
+                f"\nWARNING: {record['strategy']} keep={record['keep_ratio']} scored only "
+                f"{record['n_scored']}/{expected} requests -- the mean is over a biased subset.",
+                file=sys.stderr,
+            )
     return 0
 
 

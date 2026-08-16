@@ -288,7 +288,7 @@ def test_swap_round_trip_restores_exact_contents() -> None:
 
     # Something else uses the pool in the meantime, so restoration cannot rely on luck.
     other = allocator.allocate(2)
-    cache.key_pool[0][other] = -99.0
+    cache.key_pool[0][:, other] = -99.0  # head-major pool: block axis is 1
     allocator.free(other)
 
     new_blocks, num_tokens = preemptor.swap_in("r1", cache.key_pool, cache.value_pool)

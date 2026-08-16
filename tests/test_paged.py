@@ -155,7 +155,7 @@ def test_gather_excludes_the_unwritten_tail(bundle) -> None:
     # Two blocks are held (17 tokens), so slots 17..31 of block 1 are unwritten. Poison them.
     poison = 12345.0
     second = cache.table.blocks[1]
-    cache.key_pool[0][second, 1:] = poison
+    cache.key_pool[0][:, second, 1:] = poison  # head-major pool: block axis is 1
 
     keys, _ = cache.gather(0)
     assert keys.shape[2] == 17

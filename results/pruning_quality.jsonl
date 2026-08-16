@@ -1,0 +1,11 @@
+{"strategy": "attention", "keep_ratio": 1.0, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "attention", "keep_ratio": 0.75, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "attention", "keep_ratio": 0.5, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "attention", "keep_ratio": 0.375, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "attention", "keep_ratio": 0.25, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "attention", "keep_ratio": 0.125, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "uniform", "keep_ratio": 0.75, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "uniform", "keep_ratio": 0.5, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "uniform", "keep_ratio": 0.375, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "uniform", "keep_ratio": 0.25, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}
+{"strategy": "uniform", "keep_ratio": 0.125, "score_layer": 2, "n_scored": 0, "anls": 0.0, "mib_reclaimed": 0.0, "ttft_s_mean": 0.0, "workload_fingerprint": "94b148a0b9f5006e", "device": "Tesla T4"}

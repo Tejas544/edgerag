@@ -120,8 +120,10 @@ class Preemptor:
         pool where another sequence could claim and overwrite them mid-copy -- a race that shows
         up as one request answering with another's context, exactly the shape of ``BUGS.md`` B-03.
         """
-        keys = [pool[blocks].to("cpu", copy=True) for pool in key_pool]
-        values = [pool[blocks].to("cpu", copy=True) for pool in value_pool]
+        # Pools are head-major ``(kv_heads, num_blocks, block_size, head_dim)``, so the block axis
+        # is 1. Indexing axis 0 would silently swap out the wrong slice of a *head*.
+        keys = [pool[:, blocks].to("cpu", copy=True) for pool in key_pool]
+        values = [pool[:, blocks].to("cpu", copy=True) for pool in value_pool]
 
         if self.pin_memory:
             keys = [k.pin_memory() for k in keys]
@@ -156,8 +158,10 @@ class Preemptor:
         blocks = self.allocator.allocate(n_blocks)
 
         for layer, (keys, values) in enumerate(zip(record.keys, record.values, strict=True)):
-            key_pool[layer][blocks] = keys.to(key_pool[layer].device, non_blocking=self.pin_memory)
-            value_pool[layer][blocks] = values.to(
+            key_pool[layer][:, blocks] = keys.to(
+                key_pool[layer].device, non_blocking=self.pin_memory
+            )
+            value_pool[layer][:, blocks] = values.to(
                 value_pool[layer].device, non_blocking=self.pin_memory
             )
 

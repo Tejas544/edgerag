@@ -100,6 +100,40 @@ to recover."*
 **Revisit if:** measured gather overhead exceeds ~25% of decode time — at that point it distorts
 every throughput comparison and has to be fixed rather than footnoted.
 
+> ### ⚠️ MEASURED 2026-08-11 on a Tesla T4 — **the threshold is blown, three times over**
+>
+> | seq | block | gather | attention | **gather share** |
+> |---:|---:|---:|---:|---:|
+> | 2048 | 16 | 0.412 ms | 0.188 ms | 68.7% |
+> | 4096 | 16 | 0.797 ms | 0.238 ms | 77.0% |
+> | 6800 | 16 | 1.214 ms | 0.357 ms | **77.3%** |
+> | 8192 | 16 | 1.427 ms | 0.412 ms | **77.6%** |
+>
+> At the workload's median length the gather costs **3.4× the attention it feeds**. Block size is
+> almost irrelevant (52–78% across 8/16/32/64), and contiguous attention costs the same as paged
+> (0.362 vs 0.357 ms), so the gather is **pure overhead, not amortised**. Scaled to a full decode
+> step: 24 layers × 1.214 ms = **29 ms of gather per token**, against 8.6 ms of attention.
+>
+> The local GTX 1650 estimate was ~60%; the T4 is worse, exactly as predicted — tensor cores make
+> attention faster, so the copy occupies a larger share. Predicting the direction correctly is
+> mild consolation for the size of the number.
+>
+> **D3's reasoning was sound and its conclusion is wrong.** "Only a copy is added" is true; the
+> unexamined assumption was that the copy is *small*. It is the dominant cost of the decode
+> attention path, because the gather reads the whole KV and writes a copy of it, then attention
+> reads that copy — roughly tripling the memory traffic of a step that D14 already established is
+> bandwidth-bound.
+>
+> **Order of response, cheapest first:**
+> 1. **P6 — the redundant second copy.** `_gather_pool` copies twice: once for `pool[block_ids]`,
+>    again for `.transpose(0,1).contiguous()`, because the pool is token-major and attention wants
+>    head-major. A head-major pool makes the reshape a free view. Roughly halves the gather for a
+>    layout change. **Do this first.**
+> 2. **Re-measure.** If the share is still far above 25%, the fused Triton kernel stops being a
+>    stretch goal and becomes the honest fix — with the caveat that Triton is Colab-only (D7).
+> 3. **Report it either way.** "The gather is 77% of the attention path and here is what I did
+>    about it" is a far better answer than a design note claiming the cost is negligible.
+
 ---
 
 ## D4 · Development environment · **ACCEPTED** · 2026-08-09
@@ -819,5 +853,6 @@ and here is the measured curve" is a stronger answer than asserting it is free.
 | P2 | Equivalence tolerance: what `atol/rtol` and why. fp16 softmax accumulation drift grows with sequence length — a tolerance chosen at seq 32 will fail at seq 2048. Likely: upcast softmax to fp32, set tolerance per-length. | Phase 2 |
 | P3 | Memory-budget definition: does the 4 GB include the ~300–600 MB CUDA context? **Recommend: exclude it, state it explicitly, and report it as a separate line.** Silently excluding it is the kind of thing that unravels an otherwise good conversation. | Phase 8 |
 | P4 | Quality metric for the pruning sweep: ANLS vs exact-match vs LLM-judge. Leaning **ANLS** (standard for DocVQA, no extra model resident). | Phase 4 |
-| P6 | **`_gather_pool` copies twice, and it should copy once.** Writing the D3 measurement exposed it: `pool[block_ids]` produces one copy, then `.transpose(0,1).contiguous()` produces a second, because the pool is token-major `(blocks, slots, kv_heads, dim)` while attention wants head-major. Storing the pool as `(kv_heads, blocks, slots, dim)` makes the gather `pool[:, block_ids]`, whose reshape to `(kv_heads, seq, dim)` is a **free view** — no transpose, one copy. Untested-but-directional local numbers put gather at ~60% of the paged attention path, well above D3's 25% revisit threshold, which is unsurprising in hindsight: the gather reads the KV *and writes a copy*, then attention reads that copy, so it roughly doubles decode's memory traffic. **Do not act before the T4 number** — the local card has no tensor cores, so its attention is slow and the true fraction there is likely *higher*, not lower. If confirmed, this layout change is the cheap fix and a fused kernel is the expensive one. | Phase 5 |
+| ~~P6~~ | ✅ **DONE 2026-08-11.** Pool switched to head-major `(kv_heads, blocks, slots, dim)`, so `pool[:, block_ids]` reshapes to `(kv_heads, tokens, dim)` as a **free view** — no transpose, no second `contiguous()`. Local (untrusted, directional) gather at seq 2048 fell **1.037 ms → 0.698 ms, a 33% reduction**; the fraction of the attention path dropped 61.7% → 51.7%. Less than the 50% hoped, because the remaining copy is the gather itself and is irreducible without fusion. 91 cache tests pass unchanged, which is the real check: the layout touches the write path, CoW block copies, preemption swap, and the batched pool, and every one of those had to be re-indexed. **Needs a T4 re-measure before the number is published** — and if the share is still far above 25% there, the fused Triton kernel becomes the honest fix rather than a stretch goal. |
+| ~~P6-orig~~ | *(original entry, kept for the reasoning)* **`_gather_pool` copies twice, and it should copy once.** Writing the D3 measurement exposed it: `pool[block_ids]` produces one copy, then `.transpose(0,1).contiguous()` produces a second, because the pool is token-major `(blocks, slots, kv_heads, dim)` while attention wants head-major. Storing the pool as `(kv_heads, blocks, slots, dim)` makes the gather `pool[:, block_ids]`, whose reshape to `(kv_heads, seq, dim)` is a **free view** — no transpose, one copy. Untested-but-directional local numbers put gather at ~60% of the paged attention path, well above D3's 25% revisit threshold, which is unsurprising in hindsight: the gather reads the KV *and writes a copy*, then attention reads that copy, so it roughly doubles decode's memory traffic. **Do not act before the T4 number** — the local card has no tensor cores, so its attention is slow and the true fraction there is likely *higher*, not lower. If confirmed, this layout change is the cheap fix and a fused kernel is the expensive one. | Phase 5 |
 | ~~P5~~ | **WITHDRAWN 2026-08-10 — the claim was wrong.** I reported that batching a 57-sub-image request with a 61 one wastes tower compute on four phantom images, inferred from `pixel_values` having shape `(2, 61, ...)`. Reading `SmolVLMModel.get_image_features` shows it drops all-zero padding images (`real_images_inds`) *before* the tower runs. The padded tensor costs memory; it costs no compute. Lesson: a tensor shape is not a code path. Residual real issue is much smaller and tracked as `BUGS.md` P-26 (an all-black page is indistinguishable from padding). | — |
