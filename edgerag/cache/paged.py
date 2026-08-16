@@ -55,6 +55,7 @@ class PagedKVCache:
         pool: list[torch.Tensor] | None = None,
         value_pool: list[torch.Tensor] | None = None,
         first_layer: int = 0,
+        n_pool_layers: int | None = None,
     ) -> None:
         self.spec = spec
         self.allocator = allocator
@@ -65,6 +66,11 @@ class PagedKVCache:
         # only serves layers >= k (Phase 4's pruned half) never sees layer 0 and would otherwise
         # never grow. See edgerag/cache/compressed.py.
         self.first_layer = first_layer
+        #: How many layers this pool actually stores. Normally the whole stack, but a cache that
+        #: only serves layers ``k..L-1`` needs ``L-k`` tensors, not ``L``. Allocating the full
+        #: stack for a partial range wastes it in proportion to the range it does not cover --
+        #: which is what made the Phase 4 quality run demand twice the blocks it needed.
+        self.n_pool_layers = n_pool_layers if n_pool_layers is not None else spec.n_layers
 
         # Head-major: (kv_heads, num_blocks, block_size, head_dim). See the module docstring --
         # this ordering removes a whole second copy from the gather.
@@ -72,12 +78,21 @@ class PagedKVCache:
         # Pools are shareable so several sequences can page into one physical arena -- the whole
         # point of the allocator. Phase 3c passes them in explicitly.
         self.key_pool = pool or [
-            torch.zeros(shape, dtype=dtype, device=device) for _ in range(spec.n_layers)
+            torch.zeros(shape, dtype=dtype, device=device) for _ in range(self.n_pool_layers)
         ]
         self.value_pool = value_pool or [
-            torch.zeros(shape, dtype=dtype, device=device) for _ in range(spec.n_layers)
+            torch.zeros(shape, dtype=dtype, device=device) for _ in range(self.n_pool_layers)
         ]
         self._pending_tokens = 0
+
+    def _pool_index(self, layer_idx: int) -> int:
+        """Model layer index -> index into this cache's pool.
+
+        A cache serving layers ``k..L-1`` stores them at pool positions ``0..L-k-1``. Indexing the
+        pool by the raw model layer would need ``L`` tensors to reach position ``L-1`` and waste
+        the first ``k``.
+        """
+        return layer_idx - self.first_layer
 
     # --- interface shared with NaiveKVCache ---------------------------------------------------
 
@@ -94,7 +109,8 @@ class PagedKVCache:
         """
         per_block = self.allocator.block_size * self.spec.n_kv_heads * self.spec.head_dim
         itemsize = torch.finfo(self.dtype).bits // 8
-        return 2 * len(self.table.blocks) * per_block * itemsize * self.spec.n_layers
+        # len(key_pool), not spec.n_layers: a partial-range cache stores fewer layers.
+        return 2 * len(self.table.blocks) * per_block * itemsize * len(self.key_pool)
 
     def used_bytes(self) -> int:
         """Bytes actually written, excluding the final block's slack."""
@@ -126,8 +142,9 @@ class PagedKVCache:
             self._unshare_write_range(self.seq_len - n_new, n_new)
 
         start = self.seq_len - self._pending_tokens
-        self._write(self.key_pool[layer_idx], key, start, n_new)
-        self._write(self.value_pool[layer_idx], value, start, n_new)
+        pool_idx = self._pool_index(layer_idx)
+        self._write(self.key_pool[pool_idx], key, start, n_new)
+        self._write(self.value_pool[pool_idx], value, start, n_new)
 
         return self.gather(layer_idx)
 
@@ -159,7 +176,7 @@ class PagedKVCache:
             if copied is None:
                 continue
             old, new = copied
-            for layer in range(self.spec.n_layers):
+            for layer in range(len(self.key_pool)):
                 # Head-major pool: the block axis is 1, not 0.
                 self.key_pool[layer][:, new].copy_(self.key_pool[layer][:, old])
                 self.value_pool[layer][:, new].copy_(self.value_pool[layer][:, old])
@@ -203,8 +220,9 @@ class PagedKVCache:
             return empty, empty
 
         block_ids = torch.tensor(self.table.blocks, device=self.device, dtype=torch.long)
-        keys = self._gather_pool(self.key_pool[layer_idx], block_ids)
-        values = self._gather_pool(self.value_pool[layer_idx], block_ids)
+        pool_idx = self._pool_index(layer_idx)
+        keys = self._gather_pool(self.key_pool[pool_idx], block_ids)
+        values = self._gather_pool(self.value_pool[pool_idx], block_ids)
         return keys, values
 
     def _gather_pool(self, pool: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:

@@ -177,11 +177,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--num-blocks",
         type=int,
-        default=576,
+        default=1152,
         help=(
-            "block pool size. 576 x 16 tokens = 9,216 slots ~= 1.8 GiB at 192 KiB/token, which "
-            "covers the longest observed prompt (~8k) plus generation. The pool is allocated ONCE "
-            "and reused; oversizing it wastes VRAM the model needs (BUGS.md B-05)."
+            "block pool size. The compressed cache needs blocks for BOTH halves, and at "
+            "keep_ratio=1.0 -- the ablation's own baseline -- neither half is pruned, so a "
+            "7k-token prompt wants ~440 blocks twice. 1152 covers that with headroom at ~3.5 GiB. "
+            "The pool is allocated once and reused (BUGS.md B-05)."
         ),
     )
     parser.add_argument(
@@ -230,8 +231,27 @@ def main(argv: list[str] | None = None) -> int:
         torch.float16,
         score_layer=args.score_layer,
     )
-    print(f"block pool: {args.num_blocks} blocks x 16 tokens = "
-          f"{cache.full.allocator.num_blocks * 16:,} slots\n")
+    # Preflight: the worst case is keep_ratio=1.0, where NOTHING is pruned and both halves store
+    # the whole sequence. Checking it here turns a mid-request OutOfBlocksError into arithmetic
+    # printed before any GPU time is spent.
+    longest = max(
+        sum(len(docs_by_key[k].text) // 4 + 900 for k in e.retrieved_doc_keys if k in docs_by_key)
+        for e in heldout
+    )
+    worst_case_blocks = 2 * ((longest + args.max_new_tokens + 15) // 16)
+    print(
+        f"block pool: {args.num_blocks} blocks x 16 tokens = {args.num_blocks * 16:,} slots "
+        f"(~{args.num_blocks * 3 / 1024:.1f} GiB); worst case needs ~{worst_case_blocks}"
+    )
+    if worst_case_blocks > args.num_blocks:
+        print(
+            f"\nFAILED: at keep_ratio=1.0 neither half is pruned, so both store the full "
+            f"sequence -- roughly {worst_case_blocks} blocks against a pool of {args.num_blocks}. "
+            f"Re-run with --num-blocks {int(worst_case_blocks * 1.3)}.",
+            file=sys.stderr,
+        )
+        return 1
+    print()
 
     total_scored = 0
     for strategy in args.strategies:

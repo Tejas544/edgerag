@@ -470,6 +470,18 @@ approximation.
 **Implementation:** Phase 2, alongside the forward pass. Chunk size becomes a config knob and gets
 a memory-vs-prefill-latency sweep in Phase 8.
 
+> **Correction 2026-08-11 — the two-table design cost twice the blocks, and the baseline row is
+> the worst case.** `CompressedKVCache` originally gave both halves one shared full-stack pool, so
+> the `full` cache (serving layers 0–1) reserved slots in **all 24 layers** while writing two of
+> them. Worse, block ids are per-cache: at `keep_ratio=1.0` nothing is pruned, both halves hold
+> the entire sequence, and a 7,000-token prompt demanded **874 blocks from a 576-block pool**.
+>
+> Two things worth carrying: each half now owns a pool sized to *its own layer range*, so the two
+> together cost exactly one full stack rather than two. And **the ablation's baseline row is its
+> most memory-hungry** — counter-intuitive, because the row that prunes nothing is the one most
+> likely to exhaust the pool, so pool sizing must be done against `keep_ratio=1.0` and not against
+> the setting being advertised.
+
 **Interview value:** the KV cache gets all the attention in this problem space. "On a
 document-RAG workload the vision encoder's transient activation peak was competitive with the KV
 cache, so I chunked the tower forward and measured the tradeoff" is a specific, non-obvious

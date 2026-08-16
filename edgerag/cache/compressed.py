@@ -46,16 +46,22 @@ class CompressedKVCache:
         self.allocator = allocator
         self.score_layer = score_layer
 
-        self.full = PagedKVCache(spec, allocator, device, dtype, first_layer=0)
-        # Shares the physical pool; only the block tables differ.
+        # Each half stores only the layers it serves. Sharing one full-stack pool -- the obvious
+        # design, and the original one -- means the `full` cache reserves slots in all L layers
+        # while writing only `score_layer` of them. At the default cut that is 22 of 24 layers
+        # wasted on one half, and it doubled the block demand: at keep_ratio=1.0 both halves hold
+        # the entire sequence, so a 7,000-token prompt needed 874 blocks from a 576-block pool.
+        # Split this way the two pools together cost exactly one full stack.
+        self.full = PagedKVCache(
+            spec, allocator, device, dtype, first_layer=0, n_pool_layers=score_layer
+        )
         self.pruned = PagedKVCache(
             spec,
             allocator,
             device,
             dtype,
-            pool=self.full.key_pool,
-            value_pool=self.full.value_pool,
             first_layer=score_layer,
+            n_pool_layers=spec.n_layers - score_layer,
         )
 
     def _route(self, layer_idx: int) -> PagedKVCache:

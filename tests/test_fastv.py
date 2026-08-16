@@ -276,13 +276,41 @@ def test_score_layer_outside_the_stack_is_rejected() -> None:
         )
 
 
-def test_both_halves_share_one_pool() -> None:
-    """Freed blocks from either half must be reusable by the other."""
+def test_both_halves_share_one_allocator_not_one_pool() -> None:
+    """Freed blocks from either half must be reusable by the other -- that needs a shared
+    *allocator*, not a shared pool.
+
+    The pools are deliberately separate and right-sized: each half stores only the layers it
+    serves. Sharing one full-stack pool made the `full` cache reserve slots in all L layers while
+    writing only `score_layer` of them, and doubled the block demand at keep_ratio=1.0.
+    """
     spec = tiny_spec(n_layers=4)
     cache = CompressedKVCache(
         spec, BlockAllocator(32, 8), torch.device("cpu"), torch.float32, score_layer=2
     )
-    assert cache.pruned.key_pool is cache.full.key_pool
+    assert cache.pruned.allocator is cache.full.allocator
+    assert cache.pruned.key_pool is not cache.full.key_pool
+    assert len(cache.full.key_pool) == 2
+    assert len(cache.pruned.key_pool) == 2
+    # Together they cost exactly one full stack, not two.
+    assert len(cache.full.key_pool) + len(cache.pruned.key_pool) == spec.n_layers
+
+
+def test_pool_memory_is_one_full_stack_not_two() -> None:
+    """The bug that stopped the Phase 4 quality run, expressed as an assertion.
+
+    At keep_ratio=1.0 nothing is pruned, so both halves hold the entire sequence -- which is the
+    *worst* case for block demand, counter-intuitively, since the baseline row of the ablation is
+    the one most likely to exhaust the pool.
+    """
+    spec = tiny_spec(n_layers=24)
+    cache = CompressedKVCache(
+        spec, BlockAllocator(64, 8), torch.device("cpu"), torch.float32, score_layer=2
+    )
+    per_layer_bytes = cache.full.key_pool[0].numel() * cache.full.key_pool[0].element_size()
+    total = (len(cache.full.key_pool) + len(cache.pruned.key_pool)) * per_layer_bytes * 2
+    one_stack = spec.n_layers * per_layer_bytes * 2
+    assert total == one_stack
 
 
 # --- compressor facade ----------------------------------------------------------------------------
