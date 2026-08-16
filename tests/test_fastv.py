@@ -320,6 +320,8 @@ def bundle():
     )
     model.eval()
     spec = ModelSpec.from_hf_config(FIXTURE_MODEL, config)
+    # SDPA -- so the FastV end-to-end tests cover last_row_scores(), the cheap scoring path that
+    # replaced materialising a 9 GiB score matrix to read one row of it.
     return load_from_hf(spec, model), spec
 
 

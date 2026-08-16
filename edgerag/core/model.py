@@ -28,12 +28,17 @@ DEFAULT_VISION_CHUNK = 8
 class EdgeRagDecoder(nn.Module):
     """The language decoder: embeddings -> N transformer blocks -> norm -> lm_head."""
 
-    def __init__(self, spec: ModelSpec, linear_cls: type[LinearBase] = FP16Linear) -> None:
+    def __init__(
+        self,
+        spec: ModelSpec,
+        linear_cls: type[LinearBase] = FP16Linear,
+        use_eager: bool = False,
+    ) -> None:
         super().__init__()
         self.spec = spec
         self.embed_tokens = nn.Embedding(spec.vocab_size, spec.hidden_size, spec.pad_token_id)
         self.layers = nn.ModuleList(
-            [DecoderLayer(spec, i, linear_cls) for i in range(spec.n_layers)]
+            [DecoderLayer(spec, i, linear_cls, use_eager=use_eager) for i in range(spec.n_layers)]
         )
         self.norm = RMSNorm(spec.hidden_size, spec.rms_norm_eps)
         self.rotary = RotaryEmbedding(spec.head_dim, spec.rope_theta)
@@ -203,6 +208,7 @@ def load_from_hf(
     spec: ModelSpec,
     hf_model: nn.Module,
     linear_cls: type[LinearBase] = FP16Linear,
+    use_eager: bool = False,
 ) -> EdgeRagDecoder:
     """Copy checkpoint weights out of the HF module tree into our decoder.
 
@@ -215,7 +221,7 @@ def load_from_hf(
     inner = hf_model.model if hasattr(hf_model, "model") else hf_model
     text = inner.text_model
 
-    ours = EdgeRagDecoder(spec, linear_cls)
+    ours = EdgeRagDecoder(spec, linear_cls, use_eager=use_eager)
     ours = ours.to(dtype=next(text.parameters()).dtype, device=next(text.parameters()).device)
 
     with torch.no_grad():

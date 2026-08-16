@@ -114,7 +114,36 @@ the run — if request 1 cannot fit, neither can requests 2–60 or any later co
 spends 25 minutes of scarce quota proving it 660 times. The original loop's politeness was
 indistinguishable from progress.
 
+**Third round, and the actual root cause: eager attention is O(n²) in memory.** With both
+duplications gone, `after load` reported a healthy **4.41 GiB of 14.56** — and a *single* request
+still OOM'd at 9.59 GiB reserved. The arithmetic is unambiguous. Our `eager_attention`
+materialises the full `(batch, heads, queries, keys)` score matrix; at a 6,800-token prefill with
+32 heads that is **2.96 GiB in fp16**, plus **5.92 GiB** for the fp32 softmax copy that `P-07`
+requires. One layer peaks near 9 GiB.
+
+It never surfaced earlier because every test runs at sequence lengths under 100, where the matrix
+is a rounding error — and because HuggingFace's baseline uses SDPA, so the comparison that would
+have exposed the gap was never memory-bound on both sides.
+
+**Fix:** `sdpa_attention` becomes the shipping path; `eager_attention` is kept for the equivalence
+tests, which need it to compare against HF's eager implementation. Additionally, FastV's default
+`last_row` scoring reads only the final query's attention, so `last_row_scores` computes just that
+row — **870 KB instead of 9 GiB** at 6,800 tokens. Materialising the whole matrix to read one row
+of it was what made visual-token pruning unmeasurable at realistic prompt lengths.
+
+Both paths are now tested: `test_sdpa_matches_eager_output` (greedy tokens identical; numeric band
+5e-3, because SDPA is a different *algorithm*, not a reordering) and
+`test_sdpa_does_not_materialise_the_score_matrix`, which asserts peak memory grows sub-quadratically
+with sequence length.
+
 **Cost:** two full T4 sessions, ~50 minutes of scarce free-tier quota, plus a 9 GB download.
+
+**The lesson, and it is the sharpest of the three rounds:** every correctness test in this project
+runs at sequence lengths under 100 for speed — a deliberate choice (D4), and the reason the suite
+is fast enough to run every commit. But **a memory bug that only appears at scale is invisible to a
+suite that only runs small**. Correctness tested small; memory must be tested, or at least
+reasoned about, at the size that ships. The asymptotics of every buffer allocated per-forward
+should have been checked against the real 6,800-token workload the day D14 measured it.
 
 **The transferable lesson:** this is `B-04` again — a script-only code path with no test — but with
 a sharper edge. B-04 *crashed*, which is self-announcing. B-05 produced **a plausible file of

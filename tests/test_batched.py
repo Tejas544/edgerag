@@ -41,6 +41,8 @@ def bundle():
     )
     model.eval()
     spec = ModelSpec.from_hf_config(FIXTURE_MODEL, config)
+    # SDPA -- the shipping path. This module compares our own implementations against each other
+    # (batched vs solo, chunked vs whole), so it should exercise what actually runs.
     return load_from_hf(spec, model), spec, torch.device("cpu"), torch.float32
 
 

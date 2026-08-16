@@ -48,7 +48,8 @@ def bundle():
 @pytest.fixture(scope="module")
 def ours(bundle):
     model, spec, _, _ = bundle
-    return load_from_hf(spec, model)
+    # Eager: this module compares against HF's eager path (test_paged_matches_hf_end_to_end).
+    return load_from_hf(spec, model, use_eager=True)
 
 
 def _ids(spec: ModelSpec, seq: int, device: torch.device) -> torch.Tensor:

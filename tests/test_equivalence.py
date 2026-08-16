@@ -56,6 +56,11 @@ EXACT_RTOL = 1e-6
 CACHE_ATOL = 1e-4
 CACHE_RTOL = 1e-4
 
+#: SDPA vs eager. A *different algorithm*, not a reordering: online softmax with tiled
+#: accumulation. Measured 8.8e-04 max abs at seq 64 in fp32. Wider than CACHE_ATOL on purpose --
+#: greedy-token equality is the assertion that matters, and this only catches gross regressions.
+SDPA_ATOL = 5e-3
+
 pytestmark = pytest.mark.slow
 
 
@@ -83,8 +88,14 @@ def hf_bundle():
 
 @pytest.fixture(scope="module")
 def ours(hf_bundle):
+    """Eager, to be bit-comparable with HuggingFace's eager path.
+
+    The *shipping* path is SDPA -- eager materialises the full score matrix and cannot run a
+    6,800-token prefill (``BUGS.md`` B-05). SDPA is covered by
+    :func:`test_sdpa_matches_eager_output`, so neither path is untested.
+    """
     model, spec, _, _ = hf_bundle
-    return load_from_hf(spec, model)
+    return load_from_hf(spec, model, use_eager=True)
 
 
 @pytest.fixture(scope="module")
@@ -98,7 +109,7 @@ def hf_bundle_fp16():
 @pytest.fixture(scope="module")
 def ours_fp16(hf_bundle_fp16):
     model, spec, _, _ = hf_bundle_fp16
-    return load_from_hf(spec, model)
+    return load_from_hf(spec, model, use_eager=True)
 
 
 def _random_ids(spec: ModelSpec, batch: int, seq: int, device: torch.device) -> torch.Tensor:
@@ -412,6 +423,67 @@ def test_cache_reports_reservation_versus_use(hf_bundle) -> None:
         cache.update(k, k, layer)
 
     assert cache.used_bytes() / cache.nbytes == pytest.approx(300 / 2048, abs=1e-3)
+
+
+# --- SDPA, the shipping path (BUGS.md B-05) -------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def ours_sdpa(hf_bundle):
+    model, spec, _, _ = hf_bundle
+    return load_from_hf(spec, model, use_eager=False)
+
+
+@pytest.mark.parametrize("seq_len", [1, 17, 64])
+def test_sdpa_matches_eager_output(hf_bundle, ours, ours_sdpa, seq_len) -> None:
+    """The production path must agree with the reference one.
+
+    Eager is what the HF comparison is made against; SDPA is what actually runs, because eager
+    materialises a ``(heads, queries, keys)`` matrix that is 9 GiB at a realistic prompt length.
+    Testing only eager would leave the shipped path uncovered -- the mistake ``BUGS.md`` B-04
+    records.
+
+    SDPA is not a reordering of the eager arithmetic -- it is a different algorithm (online
+    softmax, tiled accumulation), so bit-exactness was never on offer. Measured 8.8e-04 max abs on
+    0.4% of elements at seq 64, in fp32. **Greedy tokens are the real assertion here**; the
+    numeric band only guards against a gross regression, and holding it near the eager tolerance
+    would just invite loosening the tests that genuinely are exact.
+    """
+    _, spec, device, _ = hf_bundle
+    ids = _random_ids(spec, 1, seq_len, device)
+
+    with torch.inference_mode():
+        expected = ours(input_ids=ids)
+        actual = ours_sdpa(input_ids=ids)
+
+    torch.testing.assert_close(actual, expected, atol=SDPA_ATOL, rtol=SDPA_ATOL)
+    assert torch.equal(actual.argmax(-1), expected.argmax(-1)), "SDPA changed the greedy tokens"
+
+
+def test_sdpa_does_not_materialise_the_score_matrix(hf_bundle, ours_sdpa) -> None:
+    """The whole point: memory must not scale with sequence length squared.
+
+    Doubling the prompt roughly doubles activation memory under SDPA and roughly *quadruples* it
+    under eager. Asserted as a ratio rather than an absolute, so it holds on any device.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA to measure allocation")
+
+    _, spec, _, _ = hf_bundle
+    cuda_model = ours_sdpa.to("cuda")
+    peaks = []
+    for seq_len in (256, 512):
+        ids = _random_ids(spec, 1, seq_len, torch.device("cuda"))
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        with torch.inference_mode():
+            cuda_model(input_ids=ids)
+        torch.cuda.synchronize()
+        peaks.append(torch.cuda.max_memory_allocated())
+    ours_sdpa.to("cpu")
+
+    growth = peaks[1] / peaks[0]
+    assert growth < 3.0, f"peak memory grew {growth:.1f}x for 2x sequence -- looks quadratic"
 
 
 # --- vision tower (BUGS.md B-04) ----------------------------------------------------------------

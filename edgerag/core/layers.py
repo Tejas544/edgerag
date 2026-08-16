@@ -133,6 +133,61 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return x.reshape(batch, kv_heads * n_rep, seq, head_dim)
 
 
+def sdpa_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: torch.Tensor | None,
+    scaling: float,
+    n_rep: int,
+) -> torch.Tensor:
+    """Memory-efficient attention. The production path.
+
+    :func:`eager_attention` materialises the full ``(batch, heads, queries, keys)`` score matrix.
+    That is fine at test sizes and **catastrophic at real ones**: a 6,800-token prefill with 32
+    heads needs 2.96 GiB for the fp16 scores and another 5.92 GiB for the fp32 softmax copy, so a
+    single layer peaks near 9 GiB. It is why the Phase 4 quality run OOM'd on a 14.6 GiB T4
+    (``BUGS.md`` B-05) while HuggingFace's own baseline, which uses SDPA, ran fine.
+
+    ``F.scaled_dot_product_attention`` never forms that matrix. Eager is kept because the
+    equivalence tests compare against HF's eager path and because it is readable, but nothing
+    ships on it.
+    """
+    key = repeat_kv(key, n_rep)
+    value = repeat_kv(value, n_rep)
+    if attn_mask is not None:
+        # Trim to the actual key count, exactly as the eager path does. Layers above FastV's cut
+        # hold fewer tokens than the mask was built for (CONTEXT.md D5), and SDPA -- unlike a
+        # broadcast add -- rejects the mismatch rather than absorbing it.
+        attn_mask = attn_mask[..., : key.shape[-2]]
+    out = torch.nn.functional.scaled_dot_product_attention(
+        query, key, value, attn_mask=attn_mask, scale=scaling
+    )
+    return out.transpose(1, 2).contiguous()
+
+
+def last_row_scores(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    attn_mask: torch.Tensor | None,
+    scaling: float,
+    n_rep: int,
+) -> torch.Tensor:
+    """Attention paid by the **final** query only, as ``(batch, heads, 1, keys)``.
+
+    This is all FastV's default ``last_row`` scoring needs (``CONTEXT.md`` D17), and it costs
+    ``heads x keys`` instead of ``heads x queries x keys`` -- about 870 KB at 6,800 tokens versus
+    9 GiB. Computing the whole matrix to read one row of it is what made visual-token pruning
+    impossible to measure at realistic prompt lengths.
+    """
+    key = repeat_kv(key, n_rep)
+    last_query = query[:, :, -1:, :]
+    scores = torch.matmul(last_query, key.transpose(2, 3)) * scaling
+    if attn_mask is not None:
+        scores = scores + attn_mask[..., -1:, : key.shape[-2]]
+    return torch.nn.functional.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
+
+
 def eager_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -201,8 +256,17 @@ def build_causal_mask(
 class Attention(nn.Module):
     """Grouped-query attention over a KV cache."""
 
-    def __init__(self, spec: ModelSpec, layer_idx: int, linear_cls: type[nn.Module]) -> None:
+    def __init__(
+        self,
+        spec: ModelSpec,
+        layer_idx: int,
+        linear_cls: type[nn.Module],
+        use_eager: bool = False,
+    ) -> None:
         super().__init__()
+        #: Eager materialises the full score matrix -- O(queries x keys) memory. Default off; the
+        #: equivalence tests turn it on to compare against HuggingFace's eager path.
+        self.use_eager = use_eager
         self.layer_idx = layer_idx
         self.n_q_heads = spec.n_q_heads
         self.n_kv_heads = spec.n_kv_heads
@@ -240,9 +304,20 @@ class Attention(nn.Module):
         if cache is not None:
             k, v = cache.update(k, v, self.layer_idx)
 
-        out, weights = eager_attention(
-            q, k, v, attn_mask, self.scaling, self.n_rep, need_weights=need_weights
-        )
+        if self.use_eager:
+            # Test-only path: bit-comparable with HuggingFace's eager implementation, and the
+            # reference the SDPA path is validated against.
+            out, weights = eager_attention(
+                q, k, v, attn_mask, self.scaling, self.n_rep, need_weights=need_weights
+            )
+        else:
+            out = sdpa_attention(q, k, v, attn_mask, self.scaling, self.n_rep)
+            # Only the last row is ever read, so only the last row is computed.
+            weights = (
+                last_row_scores(q, k, attn_mask, self.scaling, self.n_rep)
+                if need_weights
+                else None
+            )
         return self.o_proj(out.reshape(batch, seq_len, -1)), weights
 
 
@@ -268,9 +343,15 @@ class SwiGLUMLP(nn.Module):
 class DecoderLayer(nn.Module):
     """Pre-norm transformer block: norm -> attn -> residual, norm -> mlp -> residual."""
 
-    def __init__(self, spec: ModelSpec, layer_idx: int, linear_cls: type[nn.Module]) -> None:
+    def __init__(
+        self,
+        spec: ModelSpec,
+        layer_idx: int,
+        linear_cls: type[nn.Module],
+        use_eager: bool = False,
+    ) -> None:
         super().__init__()
-        self.self_attn = Attention(spec, layer_idx, linear_cls)
+        self.self_attn = Attention(spec, layer_idx, linear_cls, use_eager=use_eager)
         self.mlp = SwiGLUMLP(spec, linear_cls)
         self.input_layernorm = RMSNorm(spec.hidden_size, spec.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(spec.hidden_size, spec.rms_norm_eps)
