@@ -9,6 +9,10 @@ memory curve without the quality curve is the half of the result that flatters u
 Runs our own decoder and our own greedy loop (``01_EDGERAG.md`` §2 forbids ``generate()``), with
 the compressor wired in, so what is measured is the code that ships.
 
+The request pipeline and the ANLS metric moved to ``bench/`` in Phase 6, when the quantization
+ablation needed both. Two experiments that claim to hold everything constant except one variable
+have to share the code that holds it constant.
+
 Scored with **ANLS** (Average Normalized Levenshtein Similarity), the standard DocVQA metric.
 Exact match is too brittle for generative answers -- "0.28" versus "0.28%" is a real answer, and
 exact match calls it a total failure. ANLS with the usual 0.5 threshold scores near-misses
@@ -25,146 +29,23 @@ Two controls, both necessary:
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import sys
-import time
 from pathlib import Path
-from typing import Any
 
 import torch
-from PIL import Image
 
-from bench.metrics import assert_device_trusted, sync
+from bench.metrics import anls, assert_device_trusted
+from bench.pipeline import free_duplicate_hf_decoder, generate
 from edgerag.cache.allocator import BlockAllocator
 from edgerag.cache.compressed import CompressedKVCache
-from edgerag.compress.fastv import FastVCompressor, FastVConfig, build_visual_mask
+from edgerag.compress.fastv import FastVConfig
 from edgerag.core.loader import HEADLINE_MODEL, load_model
-from edgerag.core.model import encode_images_chunked, load_from_hf, merge_image_features
+from edgerag.core.model import load_from_hf
 from edgerag.retrieval.corpus import load_corpus
-from edgerag.retrieval.trace import build_prompt_messages, load_trace, trace_fingerprint
+from edgerag.retrieval.trace import load_trace, trace_fingerprint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def levenshtein(a: str, b: str) -> int:
-    """Standard edit distance, iterative to avoid recursion limits on long answers."""
-    if len(a) < len(b):
-        a, b = b, a
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        current = [i]
-        for j, cb in enumerate(b, start=1):
-            current.append(
-                min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
-            )
-        previous = current
-    return previous[-1]
-
-
-def anls(prediction: str, answers: list[str], threshold: float = 0.5) -> float:
-    """Average Normalized Levenshtein Similarity against the best of several gold answers.
-
-    Below ``threshold`` the score is zeroed rather than allowed to decay smoothly, which stops a
-    long wrong answer from collecting partial credit for incidental character overlap.
-    """
-    prediction = prediction.strip().lower()
-    best = 0.0
-    for answer in answers:
-        gold = answer.strip().lower()
-        if not gold and not prediction:
-            best = max(best, 1.0)
-            continue
-        denom = max(len(prediction), len(gold))
-        if denom == 0:
-            continue
-        similarity = 1.0 - levenshtein(prediction, gold) / denom
-        best = max(best, similarity)
-    return best if best >= threshold else 0.0
-
-
-@torch.inference_mode()
-def generate(
-    decoder: torch.nn.Module,
-    hf_model: torch.nn.Module,
-    processor: Any,
-    spec: Any,
-    entry: Any,
-    docs_by_key: dict,
-    config: FastVConfig,
-    strategy: str,
-    max_new_tokens: int,
-    device: torch.device,
-    cache: CompressedKVCache,
-) -> tuple[str, dict[str, Any]]:
-    """Greedy decode one trace request under a pruning configuration.
-
-    ``cache`` is supplied by the caller and **reused across requests**. Constructing it here --
-    which is what this function did originally -- allocates a fresh block pool per request:
-    1024 blocks x 16 tokens x 192 KiB/token is **3.2 GiB**, on top of 4.18 GiB of weights, and it
-    OOM'd on every single call. See ``BUGS.md`` B-05.
-    """
-    docs = [docs_by_key[k] for k in entry.retrieved_doc_keys if k in docs_by_key]
-    images = [Image.open(REPO_ROOT / d.image_path).convert("RGB") for d in docs]
-    prompt = processor.apply_chat_template(
-        build_prompt_messages(docs, entry.question), add_generation_prompt=True
-    )
-    batch = processor(text=prompt, images=images, return_tensors="pt")
-    for image in images:
-        image.close()
-
-    input_ids = batch["input_ids"].to(device)
-    pixel_values = batch["pixel_values"].to(device)
-
-    features = encode_images_chunked(hf_model, pixel_values)
-    embeds = decoder.embed_tokens(input_ids)
-    embeds = merge_image_features(input_ids, embeds, features, spec.image_token_id)
-    visual_mask = build_visual_mask(input_ids, spec.image_token_id)
-
-    cache.reset()
-    compressor = FastVCompressor(config, strategy=strategy) if config.enabled else None
-
-    t0 = time.perf_counter()
-    logits = decoder(
-        inputs_embeds=embeds, cache=cache, compressor=compressor, visual_mask=visual_mask
-    )
-    sync()  # not torch.cuda.synchronize(): this must be runnable on CPU so a test can cover it
-    ttft = time.perf_counter() - t0
-
-    tokens: list[int] = []
-    next_id = int(logits[0, -1].argmax())
-    eos = processor.tokenizer.eos_token_id
-    for _ in range(max_new_tokens):
-        if next_id == eos:
-            break
-        tokens.append(next_id)
-        step = decoder(
-            input_ids=torch.tensor([[next_id]], device=device), cache=cache
-        )
-        next_id = int(step[0, -1].argmax())
-
-    saving = cache.savings()
-    return processor.tokenizer.decode(tokens, skip_special_tokens=True), {
-        "ttft_s": ttft,
-        "prefill_tokens": int(input_ids.shape[1]),
-        **saving,
-    }
-
-
-def _free_duplicate_hf_decoder(hf_model: torch.nn.Module) -> None:
-    """Drop HuggingFace's text decoder once its weights have been copied into ours.
-
-    Deliberately surgical: ``vision_model`` and ``connector`` must survive, because
-    ``encode_images_chunked`` still runs them (``CONTEXT.md`` D2). Everything else in the HF tree
-    is now a second copy of weights we own.
-    """
-    inner = getattr(hf_model, "model", hf_model)
-    for owner, name in ((inner, "text_model"), (hf_model, "lm_head")):
-        if hasattr(owner, name):
-            delattr(owner, name)
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -211,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     # lm_head are duplicates -- roughly 3.6 GiB of a 14.6 GiB card held for nothing. Keeping both
     # is why every request OOM'd even after the per-request pool was fixed (BUGS.md B-05).
     # Per CONTEXT.md D2 the only things still needed from HF are the vision tower and connector.
-    _free_duplicate_hf_decoder(lm.model)
+    free_duplicate_hf_decoder(lm.model)
 
     if torch.cuda.is_available():
         reserved = torch.cuda.memory_reserved() / 1024**3

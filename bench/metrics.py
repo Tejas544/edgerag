@@ -293,3 +293,48 @@ class HeldConstant:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# --- Answer quality --------------------------------------------------------------------------
+#
+# Lived in `scripts/colab_pruning_quality.py` until Phase 6 needed the same metric for the
+# quantization ablation. A metric that two experiments must agree on cannot live inside one of
+# them: the moment it is copied, the two curves stop being comparable and nobody notices.
+
+
+def levenshtein(a: str, b: str) -> int:
+    """Standard edit distance, iterative to avoid recursion limits on long answers."""
+    if len(a) < len(b):
+        a, b = b, a
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        for j, cb in enumerate(b, start=1):
+            current.append(
+                min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb))
+            )
+        previous = current
+    return previous[-1]
+
+
+def anls(prediction: str, answers: list[str], threshold: float = 0.5) -> float:
+    """Average Normalized Levenshtein Similarity against the best of several gold answers.
+
+    The standard DocVQA metric (``CONTEXT.md`` P4). Exact match is too brittle for generative
+    answers -- "0.28" against "0.28%" is a real answer and exact match scores it zero -- while an
+    unthresholded similarity hands partial credit to long wrong answers for incidental character
+    overlap. Below ``threshold`` the score is zeroed rather than allowed to decay smoothly.
+    """
+    prediction = prediction.strip().lower()
+    best = 0.0
+    for answer in answers:
+        gold = answer.strip().lower()
+        if not gold and not prediction:
+            best = max(best, 1.0)
+            continue
+        denom = max(len(prediction), len(gold))
+        if denom == 0:
+            continue
+        similarity = 1.0 - levenshtein(prediction, gold) / denom
+        best = max(best, similarity)
+    return best if best >= threshold else 0.0

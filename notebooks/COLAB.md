@@ -114,7 +114,41 @@ every two minutes.
 > budget is small. Note n=40 gives a standard error near 0.06, so gaps under ~0.12 in that table
 > are ties. If this is re-run, spend the time on **more queries, not more ratios**.
 
-### 8 · Bring it home
+### 8 · The quantization ablation — ~30 min
+
+```python
+!python -m scripts.colab_quant_ablation --drive /content/drive/MyDrive/edgerag
+```
+
+The two Phase 6 columns that need a GPU. The third is already done: the memory column is exact
+arithmetic and ran locally (`CONTEXT.md` D21), so this script does not recompute it — **it checks
+it**, printing the delta between the bytes each arm actually holds and the bytes the ledger
+predicted. A delta over 1 MiB is a finding about the ledger, and the run continues so you keep the
+measurement that produced it.
+
+Smoke test first if quota is tight — one arm, two queries, about four minutes:
+
+```python
+!python -m scripts.colab_quant_ablation --drive /content/drive/MyDrive/edgerag \
+    --arms fp16 --n-queries 2 --trials 1
+```
+
+**Read three things, in this order:**
+
+- **`ledger agrees`** on every arm. This is the cheapest possible check that the model on the card
+  is the model the README describes.
+- **the `tok/s` column, expecting INT4 to be SLOWER.** `QuantLinear` dequantizes then calls a
+  normal matmul, and a T4 has no INT4 tensor cores, so the packed bytes are expanded before they
+  reach the multiplier. D7 predicted this in advance and chose it as the documented cut line: the
+  memory win is real, the speed win needs a fused kernel. A number below 1.00x here is the
+  expected result, not a regression.
+- **the `ViT` rows' `tok/s`, which must match fp16.** The tower runs once in prefill and is not in
+  the decode loop, so quantizing it cannot move decode throughput. If it does, distrust the run.
+
+Resumable per arm: a completed arm is appended to the file and skipped on the next invocation, so
+a disconnect costs one arm rather than the session.
+
+### 9 · Bring it home
 
 ```python
 %cd /content/edgerag

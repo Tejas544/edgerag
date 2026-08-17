@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.colab_pruning_quality import anls, levenshtein
+from bench.metrics import anls, levenshtein
 
 # --- edit distance ------------------------------------------------------------------------------
 
@@ -120,6 +120,7 @@ def test_generate_runs_end_to_end_on_the_fixture(tmp_path) -> None:
     import torch
     from PIL import Image
 
+    from bench.pipeline import generate
     from edgerag.cache.allocator import BlockAllocator
     from edgerag.cache.compressed import CompressedKVCache
     from edgerag.compress.fastv import FastVConfig
@@ -128,11 +129,16 @@ def test_generate_runs_end_to_end_on_the_fixture(tmp_path) -> None:
     from edgerag.core.spec import ModelSpec
     from edgerag.retrieval.corpus import CorpusDoc
     from edgerag.retrieval.trace import TraceEntry
-    from scripts.colab_pruning_quality import generate
 
     config_obj = transformers.AutoConfig.from_pretrained(FIXTURE_MODEL)
+    # The *text* path is eager so it is bit-comparable with our decoder. The **vision tower is
+    # not** -- it is HuggingFace's on both sides of every comparison here, so its attention
+    # implementation cancels out, while eager costs +0.76 GiB of transient score matrix against
+    # SDPA's +0.17 (measured). That is B-05's lesson applied to the suite: the peak that killed
+    # the T4 quality run is the same peak that makes this file die on a loaded dev box (P-27).
     config_obj._attn_implementation = "eager"
     config_obj.text_config._attn_implementation = "eager"
+    config_obj.vision_config._attn_implementation = "sdpa"
     hf = transformers.AutoModelForImageTextToText.from_pretrained(
         FIXTURE_MODEL, config=config_obj, dtype=torch.float32
     )
