@@ -69,8 +69,14 @@ def _load(device: torch.device, dtype: torch.dtype):
     torch.manual_seed(0)
 
     config = transformers.AutoConfig.from_pretrained(FIXTURE_MODEL)
+    # The *text* path is eager so it is bit-comparable with our decoder. The **vision tower is
+    # not** -- it is HuggingFace's on both sides of every comparison here, so its attention
+    # implementation cancels out, while eager costs +0.76 GiB of transient score matrix against
+    # SDPA's +0.17 (measured). That is B-05's lesson applied to the suite: the peak that killed
+    # the T4 quality run is the same peak that makes this file die on a loaded dev box (P-27).
     config._attn_implementation = "eager"
     config.text_config._attn_implementation = "eager"
+    config.vision_config._attn_implementation = "sdpa"
 
     model = transformers.AutoModelForImageTextToText.from_pretrained(
         FIXTURE_MODEL, config=config, dtype=dtype

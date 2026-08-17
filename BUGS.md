@@ -293,6 +293,50 @@ absent, `getattr(cfg, name, default)` is not a safe idiom — the default is the
 
 ---
 
+### B-07 · The test suite could not finish, and the accumulation theory was wrong · 2026-08-17 · Phase 6
+
+**Symptom:** `pytest` died partway through with `Windows fatal exception: access violation` —
+no traceback into our code, no `MemoryError`, just a native crash inside HuggingFace's SigLIP
+attention. Reproduced at HEAD with every local change stashed, so not a regression. Individual
+test files passed; the whole suite did not.
+
+**Wrong theory:** `P-27`, written months earlier and sitting right there: *the suite holds four
+model copies*. It reads like a diagnosis, it names the right file, and it prescribes a fix
+(consolidate the module-scoped fixtures into one session-scoped bundle). It was wrong, and acting
+on it would have meant a risky refactor of the correctness gates for no benefit.
+
+**Diagnosis:** a twenty-line pytest plugin printing RSS after every test. That is the whole
+method, and it took two minutes:
+
+* **Between modules, RSS is flat at 1.52 GiB.** Module-scoped fixtures *are* being released.
+  Nothing accumulates, so consolidating them would have saved nothing.
+* **Inside `test_equivalence`, RSS climbs to 3.90 GiB**, and the peak is the two vision tests.
+
+**Root cause:** the fixtures set `config._attn_implementation = "eager"` so our decoder can be
+compared against HuggingFace's eager path — and that setting propagates to the **vision tower**,
+which nothing in the comparison requires. The tower's eager attention materialises a
+`(sub-images, heads, patches, patches)` score matrix: measured **+0.76 GiB transient, against
++0.17 GiB for SDPA**. On a dev box with ~2 GiB free that is the difference between finishing and
+a failed allocation inside a native kernel, which Windows reports as an access violation rather
+than as the out-of-memory it is.
+
+**This is `B-05`'s lesson in a second costume.** There, eager attention's O(n²) memory killed a T4
+quality run. Here the same mechanism kills the test suite. Both times the fix was to stop
+materialising a score matrix nobody reads.
+
+**Fix:** pin `config.vision_config._attn_implementation = "sdpa"` at all five model-loading test
+sites. The tower is HuggingFace's on *both* sides of every comparison in this suite, so its
+attention implementation cancels out; the text path stays eager and bit-comparable. No tolerance
+was widened and no test was skipped. **Result: 391 passed in 2:23 — the first complete run of the
+suite on this machine.**
+
+**Prevention:** the reason is written at each of the five sites, because the next person to add a
+model fixture will copy the block above it.
+
+**Cost:** 40 minutes, most of it spent not acting on P-27.
+
+---
+
 ### B-06 · A quantization test that failed one run in four, at exactly its own threshold · 2026-08-17 · Phase 6
 
 **Symptom:** `test_quant_linear_matches_fp16_within_quantization_error` failed with "quantized
@@ -479,13 +523,8 @@ the skip list is itself an interview answer.
 reason SmoothQuant/AWQ exist. Expect it; if you see it, you've independently rediscovered a real
 result — say so.
 
-**P-27 · The test suite is slow and holds four model copies.** ⚠️ *recurred 2026-08-17 — and it is
-now the host, not the suite.* `tests/test_equivalence.py` dies with a Windows access violation part
-way through, **at HEAD, with no changes applied**, and passes when the machine is otherwise idle.
-The dev box has 15.6 GiB with ~4 GiB free; that file holds an fp32 CPU model plus our decoder plus
-HF's, and fp32 eager attention on top. The other 14 files pass individually (350 tests). This is
-not a code regression and must not be "fixed" by loosening anything — the options are to free host
-RAM, or to take the consolidation below. Three modules each keep a
+**P-27 · The test suite is slow and holds four model copies.** ✅ *recurred and was fixed
+2026-08-17 — and the copies were not the cause. See `B-07`.* Three modules each keep a
 module-scoped model fixture (`test_equivalence` holds fp32-CPU *and* fp16-CUDA; `test_paged` and
 `test_fastv` one each). One full-suite run died with a fatal interpreter error and retries passed.
 Separately, the vision tests pushed the suite past ten minutes until they were cut to one small
