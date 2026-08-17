@@ -155,7 +155,14 @@ class BudgetLedger:
             ],
         }
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, basis: str = "Measured as `torch.cuda.max_memory_allocated()`.") -> str:
+        """``basis`` states where the numbers came from, and it is not decoration.
+
+        The same table is produced two ways: measured from a running pipeline, and *computed*
+        exactly from shapes before anything runs (``scripts/measure_memory_ledger.py``). Printing
+        "measured" over a computed table is a small lie that invalidates the whole document, so
+        the caller that knows must say.
+        """
         lines = [
             "| component | dtype | bytes | GiB | note |",
             "|---|:--:|---:|---:|---|",
@@ -169,10 +176,16 @@ class BudgetLedger:
             f"| **total** | | **{self.total_bytes:,}** | **{self.total_gib:.4f}** | "
             f"budget {self.limit_gib:.2f} GiB -- {verdict} |"
         )
+        context = (
+            f"~{self.cuda_context_bytes / GIB:.3f} GiB"
+            if self.cuda_context_bytes is not None
+            # Printing "~0.000 GiB" for something never measured is worse than saying so: the
+            # context is 300-600 MiB on these cards, which is 8-15% of a 4 GiB budget.
+            else "**not measured on this device** -- 300-600 MiB on Turing, per CONTEXT.md P3"
+        )
         lines.append("")
         lines.append(
-            "Measured as `torch.cuda.max_memory_allocated()`. **Excludes the CUDA context** "
-            f"(~{(self.cuda_context_bytes or 0) / GIB:.3f} GiB), which is reported separately "
+            f"{basis} **Excludes the CUDA context** ({context}), which is reported separately "
             "because it is a driver cost, not a pipeline cost."
         )
         return "\n".join(lines) + "\n"

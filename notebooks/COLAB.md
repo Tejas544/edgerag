@@ -8,6 +8,11 @@ The gather measurement needs neither the corpus nor the model weights, so it run
 before anything is downloaded. The smoke test costs one extra minute and has caught a failure
 that would otherwise have wasted twenty-five.
 
+**What does not belong in a T4 session:** anything exact. The Phase 6 memory column — every
+{fp16, int8, int4} × {LM, LM+ViT, ViT} cell — is arithmetic over tensor shapes and runs locally in
+two seconds with no weights (`python -m scripts.measure_memory_ledger`, `CONTEXT.md` D21). Spend
+GPU quota only on numbers that need a GPU: throughput and quality.
+
 ### 0 · Switch to a GPU runtime — before anything else
 
 Runtime → Change runtime type → **T4 GPU** → Save.
@@ -56,9 +61,11 @@ and new scripts fail with `No module named scripts.<x>`.
 Runs from the model config alone with synthetic KV, because gather cost depends on tensor shape
 and memory layout, not on values. Answers `CONTEXT.md` D3 and prices the head-major pool change.
 
-**Read the last line.** The previous T4 run put the gather at **77.6%** of the paged attention
-path; the layout change should have cut it substantially. If it is still far above 25%, a fused
-kernel stops being optional.
+> ✅ **Measured 2026-08-17 — `CONTEXT.md` D19.** The head-major layout took the gather down
+> ~20% in absolute time, but the share only moved **77.3% → 72.7%** at the median request length.
+> Still ~3× D3's 25% threshold, so the fused kernel is now required rather than optional. Paged
+> attention itself costs **+0.55%** over contiguous — the indirection is free and the copy is the
+> whole bill. Re-running this cell is now a regression check, not an open question.
 
 ### 5 · Corpus and frozen trace — ~6 min, CPU only
 
@@ -98,13 +105,14 @@ whose "worst case needs" is below the pool size, then a result line with **`n=2`
 ```
 
 The half of Phase 4 that cannot be computed locally. One result line per configuration, roughly
-every two minutes. Two things to read:
+every two minutes.
 
-- **where the curve falls off** — the target is 50–75% of visual tokens removed while quality
-  holds;
-- **whether `attention` beats `uniform`** at the same ratio. If it does not, the honest finding is
-  *"visual tokens are redundant on this workload"*, not *"FastV works"* — a real result either
-  way, but a different one.
+> ✅ **Measured 2026-08-17 — `CONTEXT.md` D20.** Both questions are answered, and neither the way
+> the plan hoped. The curve **has no knee**: ANLS falls 0.438 → 0.203 at keep=0.5, so the
+> "50–75% removed while quality holds" target is not reachable on document RAG. And `attention`
+> beats `uniform` only at keep=0.75; below half, uniform wins — coverage beats salience once the
+> budget is small. Note n=40 gives a standard error near 0.06, so gaps under ~0.12 in that table
+> are ties. If this is re-run, spend the time on **more queries, not more ratios**.
 
 ### 8 · Bring it home
 

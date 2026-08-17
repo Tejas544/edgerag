@@ -1,0 +1,496 @@
+{
+  "model": "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+  "computed": "exact from checkpoint config; meta-device instantiation, no weights loaded",
+  "group_size": 128,
+  "quant_config": {
+    "bits": 4,
+    "group_size": 128
+  },
+  "components": {
+    "language": {
+      "params": 1812564000,
+      "fp16_bytes": 3625128000,
+      "quantized_bytes": 1234374720,
+      "non_linear_bytes": 202051648,
+      "plan": {
+        "bits": 4,
+        "group_size": 128,
+        "n_layers": 169,
+        "n_quantized": 168,
+        "n_skipped": 1,
+        "dense_bytes": 3423076352,
+        "planned_bytes": 1032323072,
+        "saved_bytes": 2390753280,
+        "bits_per_weight": 4.125,
+        "skipped": [
+          {
+            "name": "lm_head.linear",
+            "reason": "skip-list",
+            "shape": [
+              49280,
+              2048
+            ],
+            "dense_bytes": 201850880
+          }
+        ]
+      }
+    },
+    "vision": {
+      "params": 412987248,
+      "fp16_bytes": 825974496,
+      "quantized_bytes": 414507456,
+      "non_linear_bytes": 3290112,
+      "plan": {
+        "bits": 4,
+        "group_size": 128,
+        "n_layers": 162,
+        "n_quantized": 135,
+        "n_skipped": 27,
+        "dense_bytes": 822684384,
+        "planned_bytes": 411217344,
+        "saved_bytes": 411467040,
+        "bits_per_weight": 4.1389,
+        "skipped": [
+          {
+            "name": "encoder.layers.0.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.1.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.2.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.3.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.4.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.5.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.6.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.7.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.8.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.9.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.10.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.11.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.12.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.13.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.14.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.15.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.16.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.17.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.18.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.19.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.20.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.21.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.22.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.23.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.24.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.25.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          },
+          {
+            "name": "encoder.layers.26.mlp.fc2",
+            "reason": "ragged-groups",
+            "shape": [
+              1152,
+              4304
+            ],
+            "dense_bytes": 9918720
+          }
+        ]
+      }
+    },
+    "connector": {
+      "params": 21233664,
+      "fp16_bytes": 42467328,
+      "quantized_bytes": 10948608,
+      "non_linear_bytes": 0,
+      "plan": {
+        "bits": 4,
+        "group_size": 128,
+        "n_layers": 1,
+        "n_quantized": 1,
+        "n_skipped": 0,
+        "dense_bytes": 42467328,
+        "planned_bytes": 10948608,
+        "saved_bytes": 31518720,
+        "bits_per_weight": 4.125,
+        "skipped": []
+      }
+    }
+  },
+  "matrix": [
+    {
+      "arm": "none",
+      "bits": 16,
+      "components": {
+        "language": 3625128000,
+        "vision": 825974496,
+        "connector": 42467328
+      },
+      "total_bytes": 4493569824,
+      "total_gib": 4.185,
+      "compression_vs_fp16": 1.0
+    },
+    {
+      "arm": "LM",
+      "bits": 8,
+      "components": {
+        "language": 2039681088,
+        "vision": 825974496,
+        "connector": 42467328
+      },
+      "total_bytes": 2908122912,
+      "total_gib": 2.7084,
+      "compression_vs_fp16": 1.5452
+    },
+    {
+      "arm": "LM+ViT",
+      "bits": 8,
+      "components": {
+        "language": 2039681088,
+        "vision": 553106880,
+        "connector": 21565440
+      },
+      "total_bytes": 2614353408,
+      "total_gib": 2.4348,
+      "compression_vs_fp16": 1.7188
+    },
+    {
+      "arm": "ViT",
+      "bits": 8,
+      "components": {
+        "language": 3625128000,
+        "vision": 553106880,
+        "connector": 21565440
+      },
+      "total_bytes": 4199800320,
+      "total_gib": 3.9114,
+      "compression_vs_fp16": 1.0699
+    },
+    {
+      "arm": "LM",
+      "bits": 4,
+      "components": {
+        "language": 1234374720,
+        "vision": 825974496,
+        "connector": 42467328
+      },
+      "total_bytes": 2102816544,
+      "total_gib": 1.9584,
+      "compression_vs_fp16": 2.1369
+    },
+    {
+      "arm": "LM+ViT",
+      "bits": 4,
+      "components": {
+        "language": 1234374720,
+        "vision": 414507456,
+        "connector": 10948608
+      },
+      "total_bytes": 1659830784,
+      "total_gib": 1.5458,
+      "compression_vs_fp16": 2.7072
+    },
+    {
+      "arm": "ViT",
+      "bits": 4,
+      "components": {
+        "language": 3625128000,
+        "vision": 414507456,
+        "connector": 10948608
+      },
+      "total_bytes": 4050584064,
+      "total_gib": 3.7724,
+      "compression_vs_fp16": 1.1094
+    }
+  ],
+  "skips": {
+    "sensitive_bytes": 201850880,
+    "sensitive_layers": [
+      "language.lm_head.linear"
+    ],
+    "ragged_bytes": 267805440,
+    "ragged_layers": [
+      "vision.encoder.layers.0.mlp.fc2",
+      "vision.encoder.layers.1.mlp.fc2",
+      "vision.encoder.layers.2.mlp.fc2",
+      "vision.encoder.layers.3.mlp.fc2",
+      "vision.encoder.layers.4.mlp.fc2",
+      "vision.encoder.layers.5.mlp.fc2",
+      "vision.encoder.layers.6.mlp.fc2",
+      "vision.encoder.layers.7.mlp.fc2",
+      "vision.encoder.layers.8.mlp.fc2",
+      "vision.encoder.layers.9.mlp.fc2",
+      "vision.encoder.layers.10.mlp.fc2",
+      "vision.encoder.layers.11.mlp.fc2",
+      "vision.encoder.layers.12.mlp.fc2",
+      "vision.encoder.layers.13.mlp.fc2",
+      "vision.encoder.layers.14.mlp.fc2",
+      "vision.encoder.layers.15.mlp.fc2",
+      "vision.encoder.layers.16.mlp.fc2",
+      "vision.encoder.layers.17.mlp.fc2",
+      "vision.encoder.layers.18.mlp.fc2",
+      "vision.encoder.layers.19.mlp.fc2",
+      "vision.encoder.layers.20.mlp.fc2",
+      "vision.encoder.layers.21.mlp.fc2",
+      "vision.encoder.layers.22.mlp.fc2",
+      "vision.encoder.layers.23.mlp.fc2",
+      "vision.encoder.layers.24.mlp.fc2",
+      "vision.encoder.layers.25.mlp.fc2",
+      "vision.encoder.layers.26.mlp.fc2"
+    ]
+  },
+  "ledger": {
+    "limit_gib": 4.0,
+    "total_gib": 3.1243,
+    "within_budget": true,
+    "cuda_context_bytes": null,
+    "entries": [
+      {
+        "component": "language",
+        "bytes": 1234374720,
+        "gib": 1.1496,
+        "dtype": "int4",
+        "note": "quantized at 4.125 bits/weight; still fp16: 192 MiB skip list, 193 MiB embeddings/norms"
+      },
+      {
+        "component": "vision",
+        "bytes": 414507456,
+        "gib": 0.386,
+        "dtype": "int4",
+        "note": "quantized at 4.139 bits/weight; still fp16: 255 MiB ragged groups, 3 MiB embeddings/norms"
+      },
+      {
+        "component": "connector",
+        "bytes": 10948608,
+        "gib": 0.0102,
+        "dtype": "int4",
+        "note": "quantized at 4.125 bits/weight"
+      },
+      {
+        "component": "activation + workspace",
+        "bytes": 353548512,
+        "gib": 0.3293,
+        "dtype": "float16",
+        "note": "inferred: measured T4 peak 5.763 GiB minus fp16 weights and the KV of a median 6758-token request; +/-0.17 GiB for the p10-p90 length spread (5921-7795 tokens)"
+      },
+      {
+        "component": "KV cache, 1 request",
+        "bytes": 1341259776,
+        "gib": 1.2491,
+        "dtype": "float16",
+        "note": "6758 median prompt tokens + 64 generated, at 192 KiB/token (MHA -- D10)"
+      }
+    ]
+  },
+  "summary": {
+    "arm": "LM+ViT",
+    "bits": 4,
+    "weights_bytes": 1659830784,
+    "activation_bytes": 353548512,
+    "activation_uncertainty_bytes": 184221696,
+    "kv_bytes_per_request": 1341259776,
+    "median_prompt_tokens": 6758,
+    "headroom_bytes": 940328224,
+    "concurrent_requests": 1.7,
+    "within_budget": true
+  }
+}

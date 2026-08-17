@@ -857,6 +857,162 @@ and here is the measured curve" is a stronger answer than asserting it is free.
 
 ---
 
+## D19 · The head-major pool paid ~20%, and the gather still dominates · **MEASURED** · 2026-08-17
+
+T4, `results/gather_overhead.json` against `results/gather_overhead_token_major.json` (the same
+script, the pool layout being the only change — P6). Block size 16, the size the pipeline ships:
+
+| seq | gather ms, token-major → head-major | gather fraction |
+|---:|---|---:|
+| 512 | 0.192 → 0.115 | 52.0% → 44.9% |
+| 2,048 | 0.412 → 0.287 | 68.7% → 64.9% |
+| 4,096 | 0.797 → 0.598 | 77.0% → 67.6% |
+| **6,800** | **1.214 → 0.977** | **77.3% → 72.7%** |
+| 8,192 | 1.427 → 1.186 | 77.6% → 73.5% |
+
+**Finding 1 — the layout change is real, and smaller than it was locally.** Median −20% across the
+20 (seq × block) cells, 18 of them negative, against the −33% the local card predicted. The two
+positive cells are both at seq 512, where the whole measurement is under 0.25 ms and the timer is
+the dominant term.
+
+Cross-session caution applies (D14 finding 5b: 12–14% latency variance between Colab sessions).
+−20% is outside that band and consistent in sign, so the direction holds; the magnitude does not
+deserve three significant figures. **The fraction is the number to quote** — it is a ratio taken
+inside one session, so a slow clock cancels out of it.
+
+**Finding 2 — and it does not matter enough. The gather is still 72.7% of the paged attention path
+at the median request length**, against D3's 25% revisit threshold. The layout change moved it
+77.3% → 72.7%. That is not the difference between "fused kernel optional" and "fused kernel
+required"; it was required before and it is required now. **D3's cut line has been crossed, and
+the fused W4A16/gather kernel is the honest fix rather than a stretch goal.**
+
+**Finding 3 — paging itself is free; the copy is the entire cost.** Paged attention against
+attention over an already-contiguous cache: **median +0.55%** across all 20 cells. So the
+indirection through a block table costs nothing measurable, and the 72.7% is *materialising the
+gathered KV*, not looking it up. Stated per decode step at 6,800 tokens: **23.5 ms of gather
+against 8.8 ms of attention**, over 24 layers. A fused kernel is aiming at that 23.5 ms.
+
+**Finding 4 — block size still does not matter** (D15 finding 1 holds): 8/16/32/64 agree within
+noise at every length above 512.
+
+---
+
+## D20 · Visual pruning: the quality half — and it is not the half the plan wanted · **MEASURED** · 2026-08-17
+
+T4, 40 held-out requests, workload `94b148a0b9f5006e`, `results/pruning_quality.jsonl`. This
+closes D17's open half.
+
+| keep | ANLS, `attention` | ANLS, `uniform` | MiB reclaimed | TTFT (s) |
+|---:|---:|---:|---:|---:|
+| **1.000** | **0.438** | — | 0 | 2.63 |
+| 0.750 | 0.381 | 0.265 | 224 | 2.00 |
+| 0.500 | 0.203 | 0.207 | 448 | 1.40 |
+| 0.375 | 0.149 | 0.234 | 560 | 1.14 |
+| 0.250 | 0.088 | 0.146 | 671 | 0.92 |
+| 0.125 | 0.053 | 0.076 | 783 | 0.71 |
+
+**Finding 1 — the target is not reachable on this workload, and that is the result.** The plan
+asked for 50–75% of visual tokens removed with quality holding. At keep=0.5 ANLS falls 0.438 →
+0.203: **54% of the quality for 448 MiB.** Even the mildest setting tested, keep=0.75, costs 13%.
+There is no knee in this curve — it declines from the first step.
+
+The mechanism is the workload, not the method. On a document page the answer is often a single
+number in one cell of one table; a token budget that drops half the page has an even chance of
+dropping the cell. FastV was validated on natural images, where adjacent patches are genuinely
+redundant. **Document VQA is the case where they are not**, and that is a more interesting thing
+to have measured than another confirmation.
+
+**Finding 2 — attention scoring wins only while pruning is mild, and loses when it is
+aggressive.** It beats uniform at keep=0.75 (0.381 vs 0.265), ties at 0.5, and *loses* at 0.375,
+0.25 and 0.125. The reading: attention scores concentrate, so a small budget spent on the
+highest-scoring tokens buys a tight cluster and abandons the rest of the page, while a uniform
+stride keeps the layout sampled everywhere. **Below about half, coverage beats salience.**
+
+**Finding 3 — n=40 cannot separate most of these rows, and the table must be read with that
+stated.** ANLS is a per-query score in [0,1] with high variance; the standard error at n=40 is
+roughly 0.06, so gaps under ~0.12 are not resolvable. Two claims clear that bar: the fall from
+keep=1.0 to keep=0.5 (Δ0.235, ≈4 SE) and, marginally, attention over uniform at 0.75 (Δ0.117,
+≈2 SE). Everything else in the table is a tie being read as a trend. Quote the sample size or do
+not quote the number.
+
+**Finding 4 — the TTFT axis is a clean win and is independent of the quality argument.** 2.63 s →
+1.40 s at keep=0.5, a 47% cut, on the metric D14 found worst (25 s at batch 4).
+
+**Two things not to say about this table.** The `n_scored=2` line in the JSONL is COLAB step 6's
+smoke test, not a data point — its ANLS of 0.889 is two questions and is not comparable. And the
+0.438 baseline is *not* limited by retrieval: the trace plants the gold page first in every
+request (`build_trace`, D8's stub retriever, recall@5 = 100% by construction on all 165 held-out
+queries). The model is being handed the right page alongside four distractors and scoring 0.438.
+Real retrieval arrives in Phase 7 and can only lower that.
+
+**Consequence:** FastV stays as a *memory knob with a measured price*, not as a free win. The
+README claim becomes "50% of visual tokens buys 448 MiB and costs half the answer quality on
+document RAG — here is the curve, and here is why this workload is the hard case", which is a
+better sentence than the one the plan was hoping to write.
+
+---
+
+## D21 · The memory ledger: INT4 gives 2.7×, and every missing byte is named · **COMPUTED** · 2026-08-17
+
+`scripts/measure_memory_ledger.py`, exact from the checkpoint config on a `meta`-device model —
+no GPU, no weights, no T4 (`results/memory_ledger.json`). Weights only, GiB:
+
+| arm | bits | language | vision | connector | total | vs fp16 |
+|---|---:|---:|---:|---:|---:|---:|
+| fp16 | 16 | 3.376 | 0.769 | 0.040 | **4.185** | 1.00× |
+| LM | 8 | 1.900 | 0.769 | 0.040 | 2.708 | 1.55× |
+| LM+ViT | 8 | 1.900 | 0.515 | 0.020 | 2.435 | 1.72× |
+| ViT | 8 | 3.376 | 0.515 | 0.020 | 3.911 | 1.07× |
+| LM | 4 | 1.150 | 0.769 | 0.040 | 1.958 | 2.14× |
+| **LM+ViT** | **4** | **1.150** | **0.386** | **0.010** | **1.546** | **2.71×** |
+| ViT | 4 | 3.376 | 0.386 | 0.010 | 3.772 | 1.11× |
+
+**Finding 1 — INT4 buys 2.71×, not 4×, and the shortfall is three named line items.** The
+`lm_head` at 192.5 MiB (skip list, P-21), embeddings and norms at 193 MiB (not linear layers at
+all, so never candidates), and the vision MLP at 255 MiB (finding 2). 4× is the number you get by
+counting only the layers you quantized and calling it the model.
+
+**Finding 2 — the vision tower barely compresses: 787 → 395 MiB, 2.0×.** 27 of its 81 linear
+layers are the MLP's `fc2` with `in_features=4304 = 16 × 269`, which **no power-of-two group size
+above 16 divides**. They cannot be quantized at group 128 at all. At group 16 they would cost 80
+MiB rather than 255 (5.00 bits/weight, because the scales are then 1/16th of the payload), taking
+the tower to 3.6×. That option is *reported and not taken*: a per-layer group-size fallback would
+make this table describe a model nobody ran. `QuantLinear` therefore refuses to construct at a
+group size that does not divide, rather than failing later at `load_weight`.
+
+**Finding 3 — fp16 does not fit on weights alone.** 4.185 GiB against a 4.0 GiB ceiling, before a
+single KV block. D14 finding 1 measured this as an OOM; here it is as arithmetic. So the honest
+comparison is not "4× less memory" but **"runs at all versus does not"**.
+
+**The accounting table**, LM+ViT at INT4, one request in flight:
+
+| component | GiB | |
+|---|---:|---|
+| KV cache, 1 request | 1.249 | 6,758 median prompt tokens + 64 generated, 192 KiB/token (MHA) |
+| language | 1.150 | 385 MiB of it stays fp16 |
+| vision | 0.386 | 259 MiB of it stays fp16 |
+| activation + workspace | 0.329 | **inferred, ±0.17** — see below |
+| connector | 0.010 | |
+| **total** | **3.124** | 0.88 GiB spare = **1.7 concurrent requests** |
+
+**Finding 4 — one line is not exact, and it is the one that sank P-25.** The activation term is
+inferred, not computed: measured T4 peak (5.763 GiB) minus fp16 weights minus the KV of a median
+request. The baseline harness records `prompt_tokens: -1`, so the request's own length is not on
+file and the p10–p90 spread (5,921–7,795 tokens) carries ±0.17 GiB into the estimate. It is small
+for the same reason B-05 was a bug: HuggingFace's tower runs SDPA and never materialises a score
+matrix. **Action:** record real prompt lengths in the harness, then this line stops being an
+inference.
+
+**Finding 5 — the CUDA context is excluded, and it is not a rounding error.** 300–600 MiB on
+Turing is 8–15% of the whole budget (P3). It is unmeasured on the T4; the ledger now says so
+explicitly instead of printing `~0.000 GiB`.
+
+Two structural checks fall out of the script for free: our from-scratch decoder is
+**parameter-identical** to the checkpoint's text stack (1,812,563,968 either way), and the plan
+the ledger prices is byte-identical to the model that gets built (`test_quant_wiring.py`).
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
@@ -864,7 +1020,7 @@ and here is the measured curve" is a stronger answer than asserting it is free.
 | P1 | Preemption policy: recompute vs swap vs reject. Leaning **recompute-on-evict** (no CPU↔GPU transfer, simplest correctness story). **Amended 2026-08-10 — D14 removes one of the reasons.** "Prefill is compute-bound so recompute is cheap" assumed spare FLOPs; the measured TTFT is **3.7 s at batch 1 and 25 s at batch 4**, so recomputing a preempted sequence is *seconds*, not microseconds, and would wreck p99. Swap-to-host now looks better than it did: 1.27 GiB over PCIe is ~100 ms, an order of magnitude cheaper than recompute. Decide with a measurement, not the vLLM-paper default. **Second constraint, found in Phase 3a:** copy-on-write itself can raise `OutOfBlocksError` — writing to a shared block needs a free block at the moment the pool is fullest. Admission control must reserve CoW headroom, or the system deadlocks exactly when prefix sharing is helping most. | Phase 3d |
 | P2 | Equivalence tolerance: what `atol/rtol` and why. fp16 softmax accumulation drift grows with sequence length — a tolerance chosen at seq 32 will fail at seq 2048. Likely: upcast softmax to fp32, set tolerance per-length. | Phase 2 |
 | P3 | Memory-budget definition: does the 4 GB include the ~300–600 MB CUDA context? **Recommend: exclude it, state it explicitly, and report it as a separate line.** Silently excluding it is the kind of thing that unravels an otherwise good conversation. | Phase 8 |
-| P4 | Quality metric for the pruning sweep: ANLS vs exact-match vs LLM-judge. Leaning **ANLS** (standard for DocVQA, no extra model resident). | Phase 4 |
-| ~~P6~~ | ✅ **DONE 2026-08-11.** Pool switched to head-major `(kv_heads, blocks, slots, dim)`, so `pool[:, block_ids]` reshapes to `(kv_heads, tokens, dim)` as a **free view** — no transpose, no second `contiguous()`. Local (untrusted, directional) gather at seq 2048 fell **1.037 ms → 0.698 ms, a 33% reduction**; the fraction of the attention path dropped 61.7% → 51.7%. Less than the 50% hoped, because the remaining copy is the gather itself and is irreducible without fusion. 91 cache tests pass unchanged, which is the real check: the layout touches the write path, CoW block copies, preemption swap, and the batched pool, and every one of those had to be re-indexed. **Needs a T4 re-measure before the number is published** — and if the share is still far above 25% there, the fused Triton kernel becomes the honest fix rather than a stretch goal. |
+| ~~P4~~ | ✅ **DONE 2026-08-17.** ANLS it is, and the sweep is measured (D20). The metric held up; the *sample size* did not — n=40 gives a standard error near 0.06, which is wider than most of the gaps in the table. If the pruning curve is ever re-run, spend the T4 time on more queries rather than more ratios. | — |
+| ~~P6~~ | ✅ **DONE 2026-08-11.** Pool switched to head-major `(kv_heads, blocks, slots, dim)`, so `pool[:, block_ids]` reshapes to `(kv_heads, tokens, dim)` as a **free view** — no transpose, no second `contiguous()`. Local (untrusted, directional) gather at seq 2048 fell **1.037 ms → 0.698 ms, a 33% reduction**; the fraction of the attention path dropped 61.7% → 51.7%. Less than the 50% hoped, because the remaining copy is the gather itself and is irreducible without fusion. 91 cache tests pass unchanged, which is the real check: the layout touches the write path, CoW block copies, preemption swap, and the batched pool, and every one of those had to be re-indexed. **T4 re-measure landed 2026-08-17 — see D19: −20% on the gather, and the fraction still 72.7%, so the fused kernel is now required rather than optional.** *(original note: needs a T4 re-measure before the number is published* — and if the share is still far above 25% there, the fused Triton kernel becomes the honest fix rather than a stretch goal. |
 | ~~P6-orig~~ | *(original entry, kept for the reasoning)* **`_gather_pool` copies twice, and it should copy once.** Writing the D3 measurement exposed it: `pool[block_ids]` produces one copy, then `.transpose(0,1).contiguous()` produces a second, because the pool is token-major `(blocks, slots, kv_heads, dim)` while attention wants head-major. Storing the pool as `(kv_heads, blocks, slots, dim)` makes the gather `pool[:, block_ids]`, whose reshape to `(kv_heads, seq, dim)` is a **free view** — no transpose, one copy. Untested-but-directional local numbers put gather at ~60% of the paged attention path, well above D3's 25% revisit threshold, which is unsurprising in hindsight: the gather reads the KV *and writes a copy*, then attention reads that copy, so it roughly doubles decode's memory traffic. **Do not act before the T4 number** — the local card has no tensor cores, so its attention is slow and the true fraction there is likely *higher*, not lower. If confirmed, this layout change is the cheap fix and a fused kernel is the expensive one. | Phase 5 |
 | ~~P5~~ | **WITHDRAWN 2026-08-10 — the claim was wrong.** I reported that batching a 57-sub-image request with a 61 one wastes tower compute on four phantom images, inferred from `pixel_values` having shape `(2, 61, ...)`. Reading `SmolVLMModel.get_image_features` shows it drops all-zero padding images (`real_images_inds`) *before* the tower runs. The padded tensor costs memory; it costs no compute. Lesson: a tensor shape is not a code path. Residual real issue is much smaller and tracked as `BUGS.md` P-26 (an all-black page is indistinguishable from padding). | — |
