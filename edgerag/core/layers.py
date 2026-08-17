@@ -20,6 +20,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from edgerag.core.linear import LinearFactory
 from edgerag.core.spec import ModelSpec
 
 
@@ -260,7 +261,7 @@ class Attention(nn.Module):
         self,
         spec: ModelSpec,
         layer_idx: int,
-        linear_cls: type[nn.Module],
+        linear_cls: LinearFactory,
         use_eager: bool = False,
     ) -> None:
         super().__init__()
@@ -328,7 +329,7 @@ class SwiGLUMLP(nn.Module):
     shape, and swapping them is a silent error -- both directions produce valid shapes.
     """
 
-    def __init__(self, spec: ModelSpec, linear_cls: type[nn.Module]) -> None:
+    def __init__(self, spec: ModelSpec, linear_cls: LinearFactory) -> None:
         super().__init__()
         if spec.hidden_act != "silu":
             raise ValueError(f"unsupported activation {spec.hidden_act!r}; expected silu")
@@ -347,7 +348,7 @@ class DecoderLayer(nn.Module):
         self,
         spec: ModelSpec,
         layer_idx: int,
-        linear_cls: type[nn.Module],
+        linear_cls: LinearFactory,
         use_eager: bool = False,
     ) -> None:
         super().__init__()

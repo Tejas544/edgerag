@@ -293,6 +293,35 @@ absent, `getattr(cfg, name, default)` is not a safe idiom — the default is the
 
 ---
 
+### B-06 · A quantization test that failed one run in four, at exactly its own threshold · 2026-08-17 · Phase 6
+
+**Symptom:** `test_quant_linear_matches_fp16_within_quantization_error` failed with "quantized
+output drifted 12.0%" against a bound of 12%. Re-running passed. Re-running again passed. The
+fourth run failed.
+
+**Wrong theory:** that the new bias support had changed the no-bias path — the failure appeared in
+the same session as that change, which is the most seductive kind of coincidence. It had not: with
+`bias=None` the forward is the identical `F.linear` call, and the test sits above the new tests in
+file order, so it draws the same RNG state it always did.
+
+**Root cause:** the weights were seeded and **the activations were not**. `x = torch.randn(4, 256)`
+drew from the global RNG, so each run measured a different input, and the 0.12 bound sat within a
+few thousandths of the mean outcome. The test was a coin flip weighted about 3:1.
+
+**Diagnosis:** ran the single test four times. A failure rate is a diagnosis; a stack trace is not.
+
+**Fix:** a seeded `_activations()` helper, used by every value-asserting test in the file.
+**The tolerance was not touched.** Loosening a bound to stop a flake destroys the thing the bound
+was measuring — this file's bounds are set from 4-bit theory (`test_round_trip_error_matches_4bit_theory`),
+so a bound wide enough to never flake would also be wide enough to accept a broken quantizer.
+
+**Prevention:** the helper's docstring says why it is seeded, so the next person to add a test to
+this file does not reintroduce it.
+
+**Cost:** 20 minutes, all of it in the wrong theory.
+
+---
+
 ## Defused landmines
 
 Found by inspection before they fired. Recorded because "why did you check that?" is a better
@@ -450,7 +479,13 @@ the skip list is itself an interview answer.
 reason SmoothQuant/AWQ exist. Expect it; if you see it, you've independently rediscovered a real
 result — say so.
 
-**P-27 · The test suite is slow and holds four model copies.** Three modules each keep a
+**P-27 · The test suite is slow and holds four model copies.** ⚠️ *recurred 2026-08-17 — and it is
+now the host, not the suite.* `tests/test_equivalence.py` dies with a Windows access violation part
+way through, **at HEAD, with no changes applied**, and passes when the machine is otherwise idle.
+The dev box has 15.6 GiB with ~4 GiB free; that file holds an fp32 CPU model plus our decoder plus
+HF's, and fp32 eager attention on top. The other 14 files pass individually (350 tests). This is
+not a code regression and must not be "fixed" by loosening anything — the options are to free host
+RAM, or to take the consolidation below. Three modules each keep a
 module-scoped model fixture (`test_equivalence` holds fp32-CPU *and* fp16-CUDA; `test_paged` and
 `test_fastv` one each). One full-suite run died with a fatal interpreter error and retries passed.
 Separately, the vision tests pushed the suite past ten minutes until they were cut to one small

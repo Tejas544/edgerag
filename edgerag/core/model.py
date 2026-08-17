@@ -11,11 +11,14 @@ image (``BUGS.md`` P-11).
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 from torch import nn
 
 from edgerag.core.layers import DecoderLayer, RMSNorm, RotaryEmbedding, build_causal_mask
-from edgerag.core.linear import FP16Linear, LinearBase
+from edgerag.core.linear import FP16Linear, LinearFactory, QuantLinear, should_quantize
+from edgerag.core.quant import QuantConfig
 from edgerag.core.spec import ModelSpec
 
 #: D12 -- sub-images per vision-tower forward pass. A k=5 document prompt splits into ~65
@@ -31,18 +34,40 @@ class EdgeRagDecoder(nn.Module):
     def __init__(
         self,
         spec: ModelSpec,
-        linear_cls: type[LinearBase] = FP16Linear,
+        linear_cls: LinearFactory = FP16Linear,
         use_eager: bool = False,
+        quant_config: QuantConfig | None = None,
     ) -> None:
+        """``quant_config`` is the Phase 6 flag. ``None`` is the fp16 stack, unchanged.
+
+        Quantized layers are built quantized rather than built dense and converted afterwards:
+        on a 4 GiB device the dense stack is the thing that does not fit, so materialising it
+        first -- even briefly -- defeats the exercise.
+        """
         super().__init__()
         self.spec = spec
+        self.quant_config = quant_config
+
+        projection_cls: LinearFactory = (
+            linear_cls if quant_config is None else partial(QuantLinear, config=quant_config)
+        )
+        # `embed_tokens` and `norm` are not linears and never become quantized; `lm_head` is one
+        # and could be, so the decision is *asked of the skip list* rather than hardcoded here.
+        # Hardcoding it would let someone edit QUANTIZATION_SKIP_LIST and have the model quietly
+        # disagree with the list the README prints (BUGS.md P-21).
+        quantize_head = quant_config is not None and should_quantize("lm_head")
+        head_cls: LinearFactory = projection_cls if quantize_head else linear_cls
+
         self.embed_tokens = nn.Embedding(spec.vocab_size, spec.hidden_size, spec.pad_token_id)
         self.layers = nn.ModuleList(
-            [DecoderLayer(spec, i, linear_cls, use_eager=use_eager) for i in range(spec.n_layers)]
+            [
+                DecoderLayer(spec, i, projection_cls, use_eager=use_eager)
+                for i in range(spec.n_layers)
+            ]
         )
         self.norm = RMSNorm(spec.hidden_size, spec.rms_norm_eps)
         self.rotary = RotaryEmbedding(spec.head_dim, spec.rope_theta)
-        self.lm_head = linear_cls(spec.hidden_size, spec.vocab_size, bias=False)
+        self.lm_head = head_cls(spec.hidden_size, spec.vocab_size, bias=False)
 
     def forward(
         self,
@@ -207,8 +232,9 @@ def encode_images_chunked(
 def load_from_hf(
     spec: ModelSpec,
     hf_model: nn.Module,
-    linear_cls: type[LinearBase] = FP16Linear,
+    linear_cls: LinearFactory = FP16Linear,
     use_eager: bool = False,
+    quant_config: QuantConfig | None = None,
 ) -> EdgeRagDecoder:
     """Copy checkpoint weights out of the HF module tree into our decoder.
 
@@ -217,11 +243,21 @@ def load_from_hf(
     plausible-looking output -- ``strict=True`` catches missing keys but not *mis-mapped* ones.
     Reaching for each tensor by attribute means a rename upstream raises ``AttributeError`` here
     rather than degrading quality somewhere unmeasurable.
+
+    **``quant_config`` is the whole Phase 6 flag.** Not one line of the copy loop below changes:
+    ``load_weight`` is where quantization happens, so a quantized layer quantizes as the weight
+    arrives and an fp16 one copies it. That is the seam Phase 2 paid for three phases early
+    (``CONTEXT.md`` D7) -- the alternative was a refactor of every file that touches a projection,
+    landing on the evening the quality ablation was due.
+
+    The vision tower is *not* covered here: it belongs to HuggingFace (D2) and has no constructor
+    of ours to flag, so its arm of the ablation runs through
+    :func:`edgerag.core.linear.quantize_module_` instead.
     """
     inner = hf_model.model if hasattr(hf_model, "model") else hf_model
     text = inner.text_model
 
-    ours = EdgeRagDecoder(spec, linear_cls, use_eager=use_eager)
+    ours = EdgeRagDecoder(spec, linear_cls, use_eager=use_eager, quant_config=quant_config)
     ours = ours.to(dtype=next(text.parameters()).dtype, device=next(text.parameters()).device)
 
     with torch.no_grad():

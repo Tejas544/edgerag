@@ -34,6 +34,18 @@ def _weight(out_features: int = 64, in_features: int = 256, seed: int = 0) -> to
     return torch.randn(out_features, in_features, generator=g) * 0.02
 
 
+def _activations(rows: int = 4, in_features: int = 256, seed: int = 7) -> torch.Tensor:
+    """Seeded, deliberately.
+
+    The error bounds below sit close to 4-bit theory -- which is the point of asserting on
+    magnitude at all -- so an unseeded input makes them fail on roughly one run in four. A test
+    that flakes at the threshold teaches you to re-run it, which is the opposite of what an error
+    bound is for. Fix the input, not the tolerance.
+    """
+    g = torch.Generator().manual_seed(seed)
+    return torch.randn(rows, in_features, generator=g)
+
+
 # --- config -------------------------------------------------------------------------------------
 
 
@@ -231,7 +243,7 @@ def test_odd_width_is_rejected() -> None:
 def test_quant_linear_matches_fp16_within_quantization_error() -> None:
     """The layer is only useful if its output tracks the unquantized one."""
     weight = _weight(64, 256)
-    x = torch.randn(4, 256)
+    x = _activations()
 
     reference = FP16Linear(256, 64)
     reference.load_weight(weight)
@@ -267,9 +279,38 @@ def test_quant_linear_rejects_a_mismatched_weight() -> None:
         quantized.load_weight(_weight(32, 256))
 
 
-def test_quant_linear_rejects_bias() -> None:
-    with pytest.raises(NotImplementedError):
-        QuantLinear(256, 64, bias=True)
+def test_quant_linear_keeps_its_bias_in_fp16() -> None:
+    """SigLIP's projections all carry a bias, so the vision arm needs one; Llama's carry none.
+
+    The bias is not quantized. It is one value per output channel -- 0.4% of this layer, less at
+    real shapes -- and a second scale to reason about would cost more in confusion than in bytes.
+    """
+    weight, bias = _weight(64, 256), _activations(1, 64).squeeze(0) * 0.1
+    quantized = QuantLinear(256, 64, bias=True)
+    quantized.load_weight(weight, bias)
+
+    assert quantized.bias.dtype is torch.float16
+    torch.testing.assert_close(quantized.bias.float(), bias.half().float())
+
+    reference = FP16Linear(256, 64, bias=True)
+    reference.load_weight(weight, bias)
+    x = _activations()
+    relative = (quantized(x) - reference(x)).abs().mean() / reference(x).abs().mean()
+    assert float(relative) < 0.15
+
+
+def test_quant_linear_rejects_a_bias_it_was_not_built_for() -> None:
+    """Silently dropping it would leave the layer running with a zero bias and no complaint."""
+    with pytest.raises(ValueError, match="bias mismatch"):
+        QuantLinear(256, 64).load_weight(_weight(64, 256), torch.zeros(64))
+    with pytest.raises(ValueError, match="bias mismatch"):
+        QuantLinear(256, 64, bias=True).load_weight(_weight(64, 256))
+
+
+def test_quant_linear_counts_the_bias_it_holds() -> None:
+    without = QuantLinear(256, 64).weight_bytes()
+    with_bias = QuantLinear(256, 64, bias=True).weight_bytes()
+    assert with_bias - without == 64 * 2
 
 
 def test_quantization_happens_at_load_not_in_forward() -> None:
@@ -278,7 +319,7 @@ def test_quantization_happens_at_load_not_in_forward() -> None:
     quantized.load_weight(_weight(64, 256))
     before = quantized.packed.clone()
 
-    quantized(torch.randn(2, 256))
+    quantized(_activations(2))
     assert torch.equal(quantized.packed, before)
 
 
