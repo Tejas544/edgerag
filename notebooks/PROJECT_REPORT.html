@@ -1,0 +1,988 @@
+<title>EdgeRAG Field Notes</title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper:      #f5f6f4;
+    --card:       #ffffff;
+    --ink:        #12171a;
+    --ink-2:      #384447;
+    --muted:      #5e6a6b;
+    --rule:       #dce0dc;
+    --rule-soft:  #e9ece8;
+    --measure:    #14655c;
+    --measure-dim:#e0efec;
+    --ceiling:    #a8412c;
+    --ceiling-dim:#f6e6e1;
+    --chart-bg:   #fcfcfb;
+
+    --prose: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --data: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper:      #101413;
+      --card:       #171c1b;
+      --ink:        #e9edeb;
+      --ink-2:      #b9c3c0;
+      --muted:      #8b9794;
+      --rule:       #2a3230;
+      --rule-soft:  #1e2523;
+      --measure:    #4fb3a3;
+      --measure-dim:#14302c;
+      --ceiling:    #dd7f68;
+      --ceiling-dim:#33201b;
+      --chart-bg:   #f2f2f0;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper:      #101413;
+    --card:       #171c1b;
+    --ink:        #e9edeb;
+    --ink-2:      #b9c3c0;
+    --muted:      #8b9794;
+    --rule:       #2a3230;
+    --rule-soft:  #1e2523;
+    --measure:    #4fb3a3;
+    --measure-dim:#14302c;
+    --ceiling:    #dd7f68;
+    --ceiling-dim:#33201b;
+    --chart-bg:   #f2f2f0;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--prose);
+    font-size: 18px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 32px 96px;
+  }
+  .col { max-width: 65ch; }
+  .wide { max-width: 100%; }
+
+  /* ---------- masthead ---------- */
+  .masthead {
+    border-bottom: 2px solid var(--ink);
+    padding: 64px 0 24px;
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    font-family: var(--data);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--prose);
+    font-size: clamp(38px, 6vw, 62px);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+    margin: 0 0 20px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 21px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    margin: 0 0 28px;
+    max-width: 60ch;
+    text-wrap: pretty;
+  }
+  .byline {
+    font-family: var(--data);
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    padding-top: 8px;
+    border-top: 1px solid var(--rule);
+  }
+
+  /* ---------- the thesis bar ---------- */
+  .thesis {
+    margin: 0 0 52px;
+    padding: 28px 30px;
+    background: var(--card);
+    border: 1px solid var(--rule);
+  }
+  .thesis h2 {
+    font-family: var(--data);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 400;
+    margin: 0 0 22px;
+  }
+  .bar-row {
+    display: grid;
+    grid-template-columns: 128px 1fr 96px;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 10px;
+    font-family: var(--data);
+    font-size: 13px;
+  }
+  .bar-label { color: var(--ink-2); text-align: right; }
+  .bar-track {
+    position: relative;
+    height: 26px;
+    background: var(--rule-soft);
+  }
+  .bar-fill { height: 100%; background: var(--measure); }
+  .bar-fill.over { background: var(--ceiling); }
+  .bar-val { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  .bar-val.over { color: var(--ceiling); font-weight: 700; }
+  .limit-line {
+    position: absolute; top: -6px; bottom: -6px;
+    width: 2px; background: var(--ceiling);
+  }
+  .limit-note {
+    grid-column: 2 / 3;
+    font-family: var(--data);
+    font-size: 11px;
+    color: var(--ceiling);
+    letter-spacing: 0.06em;
+  }
+
+  /* ---------- sections ---------- */
+  section { margin: 0 0 60px; }
+  h2.sec {
+    font-size: 30px;
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+    font-weight: 600;
+    margin: 0 0 6px;
+    padding-top: 26px;
+    border-top: 1px solid var(--ink);
+    text-wrap: balance;
+  }
+  .sec-sub {
+    font-family: var(--data);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 24px;
+  }
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 34px 0 10px;
+    letter-spacing: -0.01em;
+  }
+  p { margin: 0 0 18px; text-wrap: pretty; }
+  strong { font-weight: 700; }
+  em { font-style: italic; }
+
+  .lede { font-size: 20px; color: var(--ink-2); }
+
+  ul, ol { margin: 0 0 18px; padding-left: 22px; }
+  li { margin-bottom: 10px; }
+
+  code {
+    font-family: var(--data);
+    font-size: 0.86em;
+    background: var(--rule-soft);
+    padding: 1px 5px;
+    color: var(--ink);
+  }
+  .tag {
+    font-family: var(--data);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--measure);
+    background: var(--measure-dim);
+    padding: 2px 7px;
+    white-space: nowrap;
+  }
+
+  pre {
+    font-family: var(--data);
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--measure);
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0 0 18px;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .table-scroll { overflow-x: auto; margin: 0 0 10px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: var(--data);
+    font-size: 13px;
+    min-width: 520px;
+  }
+  th {
+    text-align: left;
+    font-weight: 400;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 10.5px;
+    padding: 0 14px 8px 0;
+    border-bottom: 1px solid var(--ink);
+    white-space: nowrap;
+  }
+  td {
+    padding: 9px 14px 9px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+    color: var(--ink-2);
+  }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.hl td { background: var(--measure-dim); color: var(--ink); font-weight: 700; }
+  td.over { color: var(--ceiling); font-weight: 700; }
+  .caption {
+    font-family: var(--data);
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--muted);
+    margin: 0 0 26px;
+  }
+
+  figure { margin: 26px 0 8px; }
+  figure img {
+    width: 100%;
+    max-width: 100%;
+    display: block;
+    background: var(--chart-bg);
+    border: 1px solid var(--rule);
+  }
+
+  .callout {
+    border-left: 3px solid var(--measure);
+    background: var(--card);
+    padding: 18px 22px;
+    margin: 0 0 22px;
+  }
+  .callout.warn { border-left-color: var(--ceiling); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .k {
+    font-family: var(--data);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin: 0 0 26px;
+  }
+  .stat { background: var(--card); padding: 18px 20px; }
+  .stat .v {
+    font-family: var(--data);
+    font-size: 27px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    letter-spacing: -0.02em;
+    display: block;
+  }
+  .stat .l {
+    font-family: var(--data);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 6px;
+    display: block;
+    line-height: 1.4;
+  }
+
+  footer {
+    border-top: 2px solid var(--ink);
+    padding-top: 22px;
+    font-family: var(--data);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  a { color: var(--measure); text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--measure);
+    outline-offset: 3px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+  @media (max-width: 640px) {
+    body { font-size: 17px; }
+    .wrap { padding: 0 20px 64px; }
+    .bar-row { grid-template-columns: 92px 1fr 74px; font-size: 11.5px; gap: 9px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Systems engineering · build report</p>
+    <h1>Running a document-QA pipeline inside 4 GB</h1>
+    <p class="standfirst">
+      A multimodal retrieval-augmented generation stack — retrieval, a 2.2-billion-parameter
+      vision-language model, paged KV cache, continuous batching, and a streaming server — built
+      from scratch to fit a memory budget the unmodified pipeline exceeds before it answers a
+      single question.
+    </p>
+    <div class="byline">
+      <span>16,412 lines Python</span>
+      <span>489 tests</span>
+      <span>24 logged decisions</span>
+      <span>10 documented bugs</span>
+      <span>Measured on Tesla T4</span>
+    </div>
+  </header>
+
+  <div class="thesis">
+    <h2>The whole project in one chart</h2>
+    <div class="bar-row">
+      <span class="bar-label">unmodified</span>
+      <span class="bar-track">
+        <span class="bar-fill over" style="width: 88.7%"></span>
+        <span class="limit-line" style="left: 58%"></span>
+      </span>
+      <span class="bar-val over">6.12 GB</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">INT8 language</span>
+      <span class="bar-track">
+        <span class="bar-fill over" style="width: 67.4%"></span>
+        <span class="limit-line" style="left: 58%"></span>
+      </span>
+      <span class="bar-val over">4.65 GB</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">mixed precision</span>
+      <span class="bar-track">
+        <span class="bar-fill over" style="width: 61.4%"></span>
+        <span class="limit-line" style="left: 58%"></span>
+      </span>
+      <span class="bar-val over">4.24 GB</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">INT4 language</span>
+      <span class="bar-track">
+        <span class="bar-fill" style="width: 50.5%"></span>
+        <span class="limit-line" style="left: 58%"></span>
+      </span>
+      <span class="bar-val">3.49 GB</span>
+    </div>
+    <div class="bar-row">
+      <span></span>
+      <span class="limit-note">↑ the 4 GB ceiling sits here</span>
+      <span></span>
+    </div>
+  </div>
+
+  <div class="col">
+    <section>
+      <h2 class="sec">The problem, in plain words</h2>
+      <p class="sec-sub">What breaks, and why it is not obvious</p>
+
+      <p class="lede">
+        You want to ask questions about scanned documents — invoices, reports, infographics — and
+        get answers grounded in the actual pages, not in what a model half-remembers.
+      </p>
+
+      <p>
+        The standard recipe is retrieval-augmented generation: find the pages most likely to hold
+        the answer, put them in front of a model that can read images, and let it answer. Wiring
+        that up with off-the-shelf libraries takes an afternoon.
+      </p>
+
+      <p>
+        The difficulty appears when it has to run on a small GPU — a laptop card, a kiosk, an
+        on-premise box handling documents too sensitive to send to an API. This project fixed the
+        budget at <strong>4 GB</strong>, the exact size of the development machine's card, and
+        that single number breaks the easy version.
+      </p>
+
+      <p>Three things compete for the same 4 GB, and they scale differently:</p>
+
+      <ul>
+        <li>
+          <strong>The model's weights.</strong> 2.2 billion parameters at 16 bits each is
+          4.19 GB — already over the ceiling with nothing else loaded.
+        </li>
+        <li>
+          <strong>The KV cache.</strong> The model's working memory while it writes an answer.
+          A page of scanned text becomes roughly 1,400 image tokens; five retrieved pages make a
+          ~6,800-token prompt, and this model needs <strong>192 KB of cache per token</strong> —
+          another 1.25 GB for a single request.
+        </li>
+        <li>
+          <strong>Everything transient.</strong> The intermediate tensors a forward pass allocates
+          and frees. Measured here at 0.69 GB, and easy to forget entirely until it causes a crash
+          that looks data-dependent.
+        </li>
+      </ul>
+
+      <p>
+        Add them: <strong>6.12 GB against a 4 GB ceiling.</strong> Not slow — it does not run.
+        And the measured baseline agrees: the unmodified HuggingFace pipeline peaks at 5.76 GB
+        answering one question.
+      </p>
+    </section>
+
+    <section>
+      <h2 class="sec">The solution, in plain words</h2>
+      <p class="sec-sub">Four levers, and the honest finding that none is enough alone</p>
+
+      <p>Four techniques, each attacking a different term in that sum:</p>
+
+      <ul>
+        <li>
+          <strong>Quantization</strong> stores weights in 4 or 8 bits instead of 16. Fewer bits
+          means less precision, so the question is where the model can tolerate it.
+        </li>
+        <li>
+          <strong>Paged KV cache</strong> borrows the idea behind virtual memory: instead of one
+          contiguous block per request, hand out fixed-size pages from a shared pool. Requests
+          that share a prefix can share pages.
+        </li>
+        <li>
+          <strong>Visual-token pruning</strong> throws away image tokens the model is not
+          attending to, shrinking the cache.
+        </li>
+        <li>
+          <strong>Continuous batching</strong> admits new requests at every step rather than
+          waiting for a batch to finish, and splits long prompts into chunks so one big request
+          cannot freeze everyone else.
+        </li>
+      </ul>
+
+      <div class="callout">
+        <span class="k">The result that shaped the project</span>
+        <p>
+          <strong>No single lever gets there at full quality.</strong> Quantization takes the
+          pipeline from 6.12 GB to 4.24 — still over. The only configuration that fits on its own
+          is 4-bit language weights, and that costs <strong>44% of answer quality</strong>.
+          Closing the last 0.24 GB needs the second lever. The two are independent, which is
+          exactly why the project needed both.
+        </p>
+      </div>
+
+      <p>
+        That sentence did not exist until the numbers were stacked in one chart. It is a more
+        interesting claim than the one it replaced, and it is the answer to "why build all four?"
+      </p>
+    </section>
+  </div>
+
+  <section>
+    <h2 class="sec">What was actually built</h2>
+    <p class="sec-sub">Written here, not imported</p>
+
+    <div class="col">
+      <p>
+        No LangChain, no LlamaIndex, no <code>model.generate()</code>. The boundary was drawn
+        deliberately and held: HuggingFace supplies weight loading, the tokenizer, and the vision
+        tower's forward pass. Everything downstream of the decoder's input embeddings is original.
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Component</th>
+            <th>What it does</th>
+            <th>Why it was not bought off the shelf</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Decoder</td>
+            <td>Attention, RoPE, RMSNorm, grouped-query attention, SwiGLU</td>
+            <td>Numerically matched to HuggingFace's eager path so a cache bug cannot hide behind an implementation difference</td>
+          </tr>
+          <tr>
+            <td>Block allocator</td>
+            <td>Fixed-size KV pages, refcounts, copy-on-write</td>
+            <td>The memory thesis lives here; a leak or double-free is the project failing</td>
+          </tr>
+          <tr>
+            <td>Paged cache</td>
+            <td>Block tables, prefix sharing, preemption</td>
+            <td>Head-major pool layout removes one full copy per attention step</td>
+          </tr>
+          <tr>
+            <td>Scheduler</td>
+            <td>Admission, chunked prefill, preemption policy</td>
+            <td>Contains no tensors at all, so its state machine tests in milliseconds with no GPU</td>
+          </tr>
+          <tr>
+            <td>Quantizer</td>
+            <td>Group-wise INT4/INT8, symmetric, packed two per byte</td>
+            <td>Per-component bit widths — the shipping configuration mixes them</td>
+          </tr>
+          <tr>
+            <td>Compressor</td>
+            <td>FastV visual-token pruning at a chosen layer</td>
+            <td>Scores only the last attention row: 870 KB instead of 9 GB</td>
+          </tr>
+          <tr>
+            <td>Retrieval</td>
+            <td>TF-IDF over page OCR, flat exhaustive index</td>
+            <td>Interface-first, so an approximate index drops in without touching callers</td>
+          </tr>
+          <tr>
+            <td>Server</td>
+            <td>OpenAI-compatible <code>/v1/chat/completions</code>, SSE streaming</td>
+            <td>Scheduler owns the GPU on one thread; asyncio touches it only through queues</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="caption">
+      Every row is code in this repository with tests against it. The measurement harness was
+      built before any feature work, because a benchmark added afterwards measures whatever the
+      code already does.
+    </p>
+  </section>
+
+  <section>
+    <h2 class="sec">Results</h2>
+    <p class="sec-sub">Measured on a Tesla T4 · frozen workload 94b148a0b9f5006e</p>
+
+    <div class="stats">
+      <div class="stat"><span class="v">2.30 GB</span><span class="l">shipping weights, from 4.19</span></div>
+      <div class="stat"><span class="v">0.31 σ</span><span class="l">quality gap vs full precision</span></div>
+      <div class="stat"><span class="v">0 bytes</span><span class="l">memory prediction error, all 8 arms</span></div>
+      <div class="stat"><span class="v">489</span><span class="l">tests passing</span></div>
+    </div>
+
+    <div class="col">
+      <h3>Quantization: the quality cliff is in the language model</h3>
+      <p>
+        Eight configurations, varying which half of the model is quantized and to how many bits.
+        The finding contradicts what the plan expected — the vision tower was supposed to be
+        fragile, and it is not.
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Configuration</th>
+            <th class="num">Weights</th>
+            <th class="num">Predicted error</th>
+            <th class="num">Answer quality</th>
+            <th class="num">Decode speed</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Full precision</td>
+            <td class="num">4.185 GB</td>
+            <td class="num">0 B</td>
+            <td class="num">0.438</td>
+            <td class="num">1.00×</td>
+          </tr>
+          <tr>
+            <td>Vision INT4 only</td>
+            <td class="num">3.772 GB</td>
+            <td class="num">0 B</td>
+            <td class="num">0.427</td>
+            <td class="num">0.98×</td>
+          </tr>
+          <tr>
+            <td>Language INT8</td>
+            <td class="num">2.708 GB</td>
+            <td class="num">0 B</td>
+            <td class="num">0.438</td>
+            <td class="num">0.42×</td>
+          </tr>
+          <tr class="hl">
+            <td>Language INT8 + vision INT4</td>
+            <td class="num">2.296 GB</td>
+            <td class="num">0 B</td>
+            <td class="num">0.419</td>
+            <td class="num">0.42×</td>
+          </tr>
+          <tr>
+            <td>Language INT4</td>
+            <td class="num">1.958 GB</td>
+            <td class="num">0 B</td>
+            <td class="num">0.247</td>
+            <td class="num">0.27×</td>
+          </tr>
+          <tr>
+            <td>Language + vision INT4</td>
+            <td class="num">1.546 GB</td>
+            <td class="num">0 B</td>
+            <td class="num">0.262</td>
+            <td class="num">0.27×</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="caption">
+      Quality is ANLS on 40 held-out document questions. Predicted error is the gap between a
+      byte count computed on a laptop with no weights loaded and the bytes the loaded model
+      actually held on the GPU — zero on every arm.
+    </p>
+
+    <div class="col">
+      <p>
+        <strong>INT8 on the language model is answer-identical.</strong> Not "close" — the same
+        float, <code>0.4378445165945166</code>, produced by three separate runs across two
+        different scripts. Every one of the 40 greedy answers is unchanged.
+      </p>
+      <p>
+        <strong>The vision tower is nearly free to quantize; the language model is not.</strong>
+        Vision-only INT4 costs 2.4% of quality, inside sampling noise. Language-only INT4 costs
+        44%. That asymmetry is what makes mixed precision the configuration to ship, and it was
+        not in the original experiment grid — the grid applied one bit width to everything, so
+        the best operating point was invisible until the results forced a new arm.
+      </p>
+      <p>
+        <strong>Decode speed depends on language precision and nothing else.</strong> Grouped that
+        way, arms differing only in vision precision agree to 2.4%, while arms differing in
+        language precision separate by 2.4× and 3.8×.
+      </p>
+    </div>
+
+    <figure>
+      <img src="../results/plots/quantization_tradeoff.png" alt="Scatter plot of memory against answer quality for eight quantization configurations, with the mixed-precision configuration highlighted as the knee of the curve." />
+    </figure>
+    <p class="caption">
+      Emphasis rather than eight colours: the story is which configuration is the knee, not that
+      there are eight of them.
+    </p>
+
+    <div class="col">
+      <h3>The negative result, published</h3>
+      <p>
+        Visual-token pruning was expected to remove 50–75% of image tokens while quality held.
+        It does not. Quality falls from the very first step, and halving the tokens costs
+        <strong>54% of answer quality</strong> for 448 MB.
+      </p>
+      <p>
+        The mechanism is the workload. On a document page the answer is often a single number in
+        one cell of one table; a budget that drops half the page has an even chance of dropping
+        the cell. FastV was validated on natural photographs, where neighbouring patches genuinely
+        are redundant. Document pages are the case where they are not — a more interesting thing
+        to have measured than another confirmation.
+      </p>
+    </div>
+
+    <figure>
+      <img src="../results/plots/pruning_curve.png" alt="Two declining curves of answer quality against KV cache reclaimed, with shaded uncertainty bands that overlap across most of their range." />
+    </figure>
+    <p class="caption">
+      The shaded bands are ±1 standard error at n=40. Where they overlap the two strategies are
+      indistinguishable — drawn rather than footnoted, because the most common misreading of this
+      curve is treating a gap smaller than the noise as a finding.
+    </p>
+
+    <div class="col">
+      <h3>End to end, on the real model</h3>
+      <p>
+        The server answers a document question from retrieved pages on the 2.2B model, streaming
+        over HTTP, at 2.30 GB of weights — and returns the page keys the answer was built from,
+        because an answer whose sources are wrong is a retrieval failure and gets misdiagnosed as
+        a generation one otherwise.
+      </p>
+    </div>
+
+    <pre><code>$ curl -s localhost:8000/v1/chat/completions -d '{"messages":[...]}'
+
+{ "choices": [{ "message": { "content": " 48%" }, "finish_reason": "stop" }],
+  "retrieved": ["infographicvqa:98409:0", "infographicvqa:98410:0",
+                "infographicvqa:98411:0", "infographicvqa:98414:0",
+                "infographicvqa:98417:0"],
+  "usage": { "prompt_tokens": 6525, "completion_tokens": 5 } }</code></pre>
+    <p class="caption">
+      6,525 prompt tokens is a real retrieved multimodal prompt — retrieval, vision tower, feature
+      merge and chunked prefill all ran. <code>finish_reason: "stop"</code> means the model ended
+      on its own rather than being truncated.
+    </p>
+  </section>
+
+  <section>
+    <h2 class="sec">How to run it</h2>
+    <p class="sec-sub">Local first — most of it needs no GPU at all</p>
+
+    <div class="col">
+      <p>
+        A deliberate split runs through the whole project: anything <em>exact</em> runs on a
+        laptop, and GPU time is spent only on numbers that genuinely need a GPU.
+      </p>
+    </div>
+
+    <pre><code># setup
+python -m venv .venv &amp;&amp; .venv/Scripts/activate
+pip install -e ".[dev,serve]"
+
+# the full memory budget — no GPU, no weights downloaded, ~2 seconds
+python -m scripts.measure_memory_ledger
+
+# regenerate every figure from the results files
+python -m scripts.make_plots
+
+# serve it (needs a GPU; defaults to the measured shipping configuration)
+python -m scripts.serve_rag --port 8000</code></pre>
+
+    <div class="col">
+      <p>
+        The memory ledger is the surprising one. It instantiates the 2.2-billion-parameter
+        checkpoint on PyTorch's <code>meta</code> device — shapes and dtypes with no storage
+        behind them — and prices every layer from its shape. No 9 GB download, no GPU, about two
+        seconds. Then the GPU run <em>checks</em> that prediction rather than recomputing it, and
+        the delta was zero bytes on all eight configurations.
+      </p>
+      <p>
+        Everything requiring a T4 lives in <code>scripts/colab_*.py</code> and refuses to record a
+        number on any other device. <code>notebooks/COLAB.md</code> is the runbook, ordered
+        cheapest-and-most-valuable first so a disconnect costs the least.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="sec">How to check it</h2>
+    <p class="sec-sub">The part that separates a measurement from a claim</p>
+
+    <div class="col">
+      <p>
+        Anyone can print a number. These are the mechanisms that make the numbers in this document
+        checkable by someone who does not trust them.
+      </p>
+    </div>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Check</th><th>How</th><th>What it proves</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Test suite</td>
+            <td><code>pytest</code></td>
+            <td>489 tests. Correctness gates compare our decoder against HuggingFace at fp32, where the expected difference is exactly zero.</td>
+          </tr>
+          <tr>
+            <td>Memory prediction</td>
+            <td><code>ledger_delta_bytes</code> in results</td>
+            <td>A byte count computed with no GPU matched a loaded model exactly, eight times.</td>
+          </tr>
+          <tr>
+            <td>Workload identity</td>
+            <td>fingerprint <code>94b148a0b9f5006e</code></td>
+            <td>Stamped into every record. Two results with different fingerprints were measured against different workloads and the harness refuses to tabulate them together.</td>
+          </tr>
+          <tr>
+            <td>Session provenance</td>
+            <td><code>session_id</code> per record</td>
+            <td>Cloud GPU clock speed varies ~7.5% between sessions. Whether a comparison is within one session is a property of the file, not a claim about how it was run.</td>
+          </tr>
+          <tr>
+            <td>Code provenance</td>
+            <td><code>code_version</code> per record</td>
+            <td>A git SHA per measurement, after a table was found silently mixing two code versions.</td>
+          </tr>
+          <tr>
+            <td>Charts</td>
+            <td><code>scripts/make_plots.py</code></td>
+            <td>Every axis is read from a results file at render time. No number in any figure is typed in.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout warn">
+      <span class="k">The habit behind all of it</span>
+      <p>
+        A measurement run once produced a complete, well-formed results file of zeros — every
+        configuration reporting that pruning destroyed quality, including a baseline that a test
+        already proved was a no-op. Nothing crashed. Had it been believed, the published
+        conclusion would have been confidently wrong.
+      </p>
+      <p>
+        Every measurement script now exits non-zero when it scores nothing. <strong>A silently
+        empty result is more dangerous than a crash</strong> — crashes get investigated, and tidy
+        zeros get published.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="sec">What makes it different</h2>
+    <p class="sec-sub">Against the standard project in this domain</p>
+
+    <div class="col">
+      <p>
+        The common version of "a RAG project" is an orchestration exercise: a vector database, a
+        framework, an API key, a notebook that answers questions. It demonstrates that the
+        libraries were assembled correctly. Almost every candidate has one.
+      </p>
+      <p>This one differs on four axes, and each is visible in the repository.</p>
+
+      <h3>A constraint chosen before the code</h3>
+      <p>
+        The 4 GB budget is not a config flag on a large card — it is the development machine.
+        Every design decision is downstream of that number, which is what makes the decisions
+        arguable rather than arbitrary. When a technique did not pay off, the budget is what
+        revealed it.
+      </p>
+
+      <h3>The infrastructure is the contribution</h3>
+      <p>
+        Paged attention, continuous batching, chunked prefill, INT4 quantization, copy-on-write
+        prefix sharing — these are the internals of a serving engine, written rather than
+        imported. The interview question "what did you actually build?" has an answer backed by
+        <code>git grep</code>.
+      </p>
+
+      <h3>Negative results are published, not buried</h3>
+      <p>
+        Visual-token pruning did not work on this workload, and the curve showing that is in the
+        README. The 4–8× concurrency gain the plan targeted is unreachable here, and the
+        measurement explaining why is written up. Retrieval's image-space signal measured out to
+        noise, so the shipping default is text-only.
+      </p>
+      <p>
+        There is also a scorecard: 28 failure modes were predicted before building, and the file
+        records which fired, which were prevented, and — most usefully — that one prediction named
+        the right file with the wrong cause and cost <em>more</em> than having no prediction,
+        because it looked like a diagnosis and bought agreement instead of measurement.
+      </p>
+
+      <h3>Every claim carries its provenance</h3>
+      <p>
+        Numbers are labelled measured or computed. Sample sizes travel with the means they
+        describe. When two of eight measurements were made in a different GPU session, the
+        document says which two and what that costs. The uncertainty is drawn on the charts rather
+        than mentioned in a caption.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="sec">Why this works in a placement interview</h2>
+    <p class="sec-sub">What it lets you answer that most projects cannot</p>
+
+    <div class="col">
+      <p>
+        Technical interviews for infrastructure, ML systems, and performance roles converge on a
+        handful of questions. Most projects can answer the first and stall on the rest.
+      </p>
+
+      <h3>"What was the hardest bug?"</h3>
+      <p>
+        The question candidates most often fumble. Here it has a rehearsed, specific answer with a
+        diagnosis method: a run that measured nothing and reported it as a result, found by
+        noticing an internal contradiction in the output file — a configuration scoring zero when
+        a test already proved it was a no-op — spotted without a debugger, a profiler, or the GPU
+        that produced it.
+      </p>
+      <p>
+        There are ten such entries, each with the wrong theory kept alongside the right one.
+        The wrong theory is usually the more interesting half.
+      </p>
+
+      <h3>"Why did you choose X over Y?"</h3>
+      <p>
+        24 logged decisions, each recorded with the alternative it beat and the condition that
+        would reverse it. Several were later overturned <em>by measurement</em>, and the reversals
+        are in the log next to the original reasoning — which is a stronger signal than a document
+        where every early guess happened to be right.
+      </p>
+
+      <h3>"Quote your numbers and explain the methodology."</h3>
+      <p>
+        Warmup discarded, GPU synchronisation on both sides of every timed region, percentiles
+        rather than bare means, peak-memory counters reset between runs, and a harness that
+        refuses to tabulate two runs that did not hold the same variables fixed. The methodology
+        is enforced in code, not asserted in a slide.
+      </p>
+
+      <h3>"Where does it break at 100× scale?"</h3>
+      <p>
+        Answerable with specifics: the gather step is 72.7% of the paged-attention path and needs
+        a fused kernel; retrieval recall is capped at 37.6% because that fraction of pages carry
+        no OCR text at all; INT4 is 3.8× slower than full precision until the dequantize is fused
+        into the matrix multiply, which is a roofline argument, not a guess.
+      </p>
+
+      <div class="callout">
+        <span class="k">The honest framing to use</span>
+        <p>
+          The strongest claim here is not a benchmark win. It is that a pipeline which
+          <em>did not run at all</em> on the target device now runs, streams, and cites its
+          sources — and that every number offered in support of that can be checked, including
+          the ones that did not go the way the plan wanted.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="sec">What is not done</h2>
+    <p class="sec-sub">Stated here rather than discovered in an interview</p>
+
+    <div class="col">
+      <ul>
+        <li>
+          <strong>The fused attention kernel is not written.</strong> The gather is 72.7% of the
+          paged-attention path, well past the threshold where the design log said to revisit the
+          decision. Triton has no Windows support, making it cloud-only work that was not
+          scheduled.
+        </li>
+        <li>
+          <strong>Two of eight latency measurements are cross-session.</strong> The control
+          question was answered before the cloud runtime was reclaimed; two arms still divide
+          against a baseline from a different session, and both variance figures — 2% within,
+          7.5% across — are measured rather than assumed.
+        </li>
+        <li>
+          <strong>Retrieval is text-only.</strong> The image-space query signal measured at 0.14×
+          the text side's spread, indistinguishable from zero, so it is off by default. A joint
+          embedding model would change that; this one has none.
+        </li>
+        <li>
+          <strong>Preemption is not wired into the serving executor.</strong> A request that
+          exhausts the pool mid-generation fails rather than preempting a younger one.
+        </li>
+        <li>
+          <strong>The CUDA context is excluded from the budget.</strong> At 300–600 MB it is
+          8–15% of the ceiling, reported as its own line rather than folded in or quietly ignored.
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>
+    EdgeRAG · SmolVLM2-2.2B-Instruct on DocVQA and InfographicVQA · all performance figures
+    measured on a Tesla T4 against frozen workload 94b148a0b9f5006e · memory figures computed
+    exactly from the checkpoint configuration and confirmed against the loaded model to the byte
+  </footer>
+
+</div>
