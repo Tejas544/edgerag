@@ -7,11 +7,13 @@ No LangChain. No LlamaIndex. No `model.generate()`. The paged KV-cache allocator
 continuous-batching scheduler, the visual-token compressor, and the quantized linear layers are
 written here, not imported.
 
-> **Status: Phase 6 of 8 (Aug 17, 2026).** The decoder, paged KV cache, scheduler, visual-token
-> compressor and INT4 quantization are built and measured. Retrieval quality and the serving layer
-> are Phase 7. Every number below is measured or exactly computed, with its source file named;
-> what is still unmeasured is listed under [Known limitations](#known-limitations) rather than
-> left blank. See [`PLAN.md`](PLAN.md) for the phase schedule.
+> **Status: Phase 7 of 8 (Aug 19, 2026).** The decoder, paged KV cache, scheduler, visual-token
+> compressor, INT4 quantization, hybrid retrieval and the streaming server are built and measured
+> — `/v1/chat/completions` answers a document question from retrieved pages on the 2.2B model, at
+> 2.30 GiB of weights. Phase 8 is the architecture diagram and the final write-up. Every number
+> below is measured or exactly computed, with its source file named; what is still unmeasured is
+> listed under [Known limitations](#known-limitations) rather than left blank. See
+> [`PLAN.md`](PLAN.md) for the phase schedule.
 
 ---
 
@@ -100,6 +102,14 @@ and memory accounting only.
 
 ### The memory budget, line by line
 
+![What fits in 4 GiB](results/plots/budget.png)
+
+**No single lever gets there at full quality.** Quantization takes the pipeline from 6.12 GiB
+to 4.24; the configuration that keeps fp16 answer quality is still 0.24 GiB over. Only the
+INT4 language model fits alone — and that costs 44% of ANLS. Closing the last 0.24 GiB is what
+visual-token pruning is for, and the two levers are independent: KV is fp16 in every arm, so
+the MiB pruning reclaims do not change with weight precision.
+
 `results/memory_ledger.md`, computed exactly from the checkpoint config — no weights loaded, no
 GPU involved, because quantized bytes are a function of tensor shape and nothing else. Weights
 only, GiB:
@@ -114,21 +124,26 @@ only, GiB:
 | **LM+ViT** | **4** | **1.150** | **0.386** | **0.010** | **1.546** | **2.71×** |
 | ViT | 4 | 3.376 | 0.386 | 0.010 | 3.772 | 1.11× |
 
+![Memory against quality across eight configurations](results/plots/quantization_tradeoff.png)
+
 **INT4 buys 2.71×, not 4×, and the shortfall is three named line items** rather than a rounding
 error: the `lm_head` at 192 MiB (deliberately fp16 — its error reaches `argmax` with nothing
 downstream to attenuate it), embeddings and norms at 193 MiB (not linear layers at all), and 255
 MiB of the vision MLP whose `in_features = 4304 = 16 × 269` no power-of-two group size above 16
 divides. Quoting 4× means counting only the layers you quantized and calling that the model.
 
-Assembled at LM+ViT/INT4 with one request in flight: **3.12 GiB of the 4 GiB budget**, leaving
-0.88 GiB — about 1.7 concurrent requests at 1.25 GiB of KV each. The fp16 arm supports **zero**:
-its weights alone exceed the budget before a single KV block is allocated. That is the honest
-framing of this project — not "4× less memory" but *runs at all versus does not*.
+The fp16 arm supports **zero** concurrent requests: its weights alone exceed the budget before a
+single KV block is allocated. That is the honest framing of this project — not "4× less memory"
+but *runs at all versus does not*.
+
+All three terms in the plot above are now grounded: weights and KV are computed exactly from the
+checkpoint config and confirmed to the byte against a loaded T4 model, and the activation term is
+**measured** (0.690 GiB, mean of the two arms run after the prefill-logits fix) rather than
+inferred as it was when the ledger was first written.
 
 The budget is defined as `torch.cuda.max_memory_allocated()` and **excludes the CUDA context**
 (300–600 MiB on Turing), which is reported separately because it is a driver cost, not a pipeline
-cost. One line of that table — the transient activation peak — is inferred from the measured T4
-baseline rather than computed, and is labelled as such wherever it appears.
+cost — and at 8–15% of the ceiling it is not a rounding error.
 
 ### What paging actually buys, and what it does not
 
@@ -153,6 +168,8 @@ head-major pool layout took ~20% off that and did not change the conclusion: the
 required, not optional, and it is not written.
 
 ### Visual token pruning: the price, not just the saving
+
+![ANLS against KV reclaimed, both strategies](results/plots/pruning_curve.png)
 
 FastV at layer 2, 40 held-out requests (`results/pruning_quality.jsonl`):
 
@@ -204,21 +221,33 @@ is logged in [`CONTEXT.md`](CONTEXT.md).
 Populated as they are discovered rather than at the end. [`BUGS.md`](BUGS.md) carries the bug log
 and the predicted failure modes this design is built to avoid.
 
-- **INT4 is expected to be slower than fp16, and the number is not measured yet.** `QuantLinear`
-  dequantizes then calls a normal matmul; a T4 has no INT4 tensor cores, so the packed bytes are
-  expanded before they reach the multiplier. The memory win is real and immediate; the speed win
-  needs the dequantize fused into the GEMV. The throughput and quality columns of the quantization
-  ablation are the next T4 run (`scripts/colab_quant_ablation.py`).
+- **INT4 is 4× slower than fp16, as predicted, and the fix is unbuilt.** Measured: 3.3–3.8 tok/s
+  against fp16's 13.9. `QuantLinear` dequantizes then calls a normal matmul, and a T4 has no INT4
+  tensor cores, so the packed bytes are expanded before they reach the multiplier. The memory win
+  is real; the speed win needs the dequantize fused into the GEMV, which is not written.
+- **The throughput column spans three Colab sessions and carries ~15% of variance.** Two sessions
+  agree to 1.4% while a third sits 15% low — visible in the `ViT` arms, which cannot affect decode
+  speed at all and still differ. A single-session re-run of all eight arms would fix it; the ~4×
+  INT4 regression survives the noise, the second decimal place does not.
+- **The `peak` column mixes two code versions.** Six arms were measured before the prefill-logits
+  fix and two after, a 272 MiB difference in the transient term. Weights and quality are
+  unaffected. Records now stamp `code_version` so this cannot recur silently.
 - **The fused paged-attention kernel is not written.** The gather is 72.7% of the paged attention
   path, well past the 25% threshold at which the design log said to revisit the decision. Triton
   has no Windows support, so this is Colab-only work that has not been scheduled.
 - **The pruning quality curve is n=40.** Standard error ~0.06; most gaps in that table are ties.
   More queries, not more ratios, is where the next hour of T4 time should go.
-- **Retrieval is a stub.** The frozen trace plants the gold page first in every request, so
-  recall@5 is 100% by construction and the 0.438 ANLS baseline is what the *generator* achieves
-  with the right page guaranteed present. Real hybrid retrieval is Phase 7 and can only lower it.
-- **The serving layer does not exist yet.** FastAPI, streaming, and the asyncio↔scheduler bridge
-  are Phase 7.
+- **Retrieval scores text only, because the image half measured out to noise.** Projecting the
+  query through `embed_tokens` into the vision tower's output space gives a similarity spread 0.14×
+  the text side's, with a mean per-query maximum indistinguishable from zero — so `alpha` defaults
+  to pure text. Measured on the 256M fixture; the headline model's larger tower is unchecked, and
+  reversing the default is a one-flag change if it behaves differently.
+- **Retrieval recall is 20% at k=5 against a 37.6% ceiling.** Only 37.6% of held-out questions have
+  a gold page carrying OCR text at all, so the text signal cannot reach the rest. That is roughly
+  53% of what is reachable, not 20% of what is possible.
+- **Preemption is not wired into the serving executor.** A request that exhausts the pool
+  mid-generation fails rather than preempting a younger one; admission budgets the full request up
+  front, so this only bites under copy-on-write pressure.
 - **The CUDA context is excluded from the 4 GB budget** and has not been measured on the T4. At
   300–600 MiB it is 8–15% of the ceiling, so it is reported as a separate line rather than folded
   in or quietly ignored.
