@@ -170,3 +170,60 @@ def test_one_arm_runs_end_to_end_on_the_fixture(tmp_path) -> None:
     assert measured["ttft_s"]["p50"] > 0
     assert measured["decode_tokens_per_s"] is not None
     assert measured["decode_tokens_per_s"]["p50"] > 0
+
+
+# --- resumability must not enshrine an inadequate row (BUGS.md B-10) ---------------------------
+
+
+def test_a_thinner_row_does_not_count_as_done(tmp_path) -> None:
+    """The trap that produced a 2-query fp16 baseline for a 40-query table.
+
+    A row exists for the arm, so identity-based resuming skips it -- and it was measured to a
+    weaker standard than the run now being asked for.
+    """
+    from scripts.colab_quant_ablation import completed_arms
+
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(
+        json.dumps({"arm": "fp16", "bits": 16, "n_requested": 2, "trials": 1}),
+        encoding="utf-8",
+    )
+    assert completed_arms(path, n_queries=40, trials=3) == set()
+    assert completed_arms(path, n_queries=2, trials=1) == {("fp16", 16)}
+
+
+def test_a_row_measured_more_thoroughly_still_counts_as_done(tmp_path) -> None:
+    """Resuming must not re-measure an arm that already exceeds what was asked for."""
+    from scripts.colab_quant_ablation import completed_arms
+
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(
+        json.dumps({"arm": "LM", "bits": 4, "n_requested": 60, "trials": 5}), encoding="utf-8"
+    )
+    assert completed_arms(path, n_queries=40, trials=3) == {("LM", 4)}
+
+
+def test_rows_predating_the_fields_are_treated_as_adequate(tmp_path) -> None:
+    """Nothing to compare against, and refusing to resume would be worse than trusting them."""
+    from scripts.colab_quant_ablation import completed_arms
+
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(json.dumps({"arm": "LM", "bits": 8}), encoding="utf-8")
+    assert completed_arms(path, n_queries=40, trials=3) == {("LM", 8)}
+
+
+def test_summarise_prefers_the_latest_measurement_of_an_arm(tmp_path, capsys) -> None:
+    """Append-only + re-measure means duplicates; the newer row has to win or the fix is moot."""
+    path = tmp_path / "quant_ablation.jsonl"
+    stale = {
+        "arm": "fp16", "bits": 16, "weight_gib": 4.185, "peak_allocated_bytes": 0,
+        "decode_tokens_per_s": {"p50": 14.0}, "ttft_s": {"p50": 2.6},
+        "anls": 0.8889, "n_scored": 2,
+    }
+    fresh = {**stale, "anls": 0.4378, "n_scored": 40, "decode_tokens_per_s": {"p50": 12.0}}
+    path.write_text(json.dumps(stale) + "\n" + json.dumps(fresh) + "\n", encoding="utf-8")
+
+    assert summarise(path, 40) == 0
+    out = capsys.readouterr().out
+    assert "0.4378" in out and "0.8889" not in out, "the superseded row must not be the one shown"
+    assert "superseded" in out

@@ -337,6 +337,107 @@ model fixture will copy the block above it.
 
 ---
 
+### B-10 · Resumability skipped the row that most needed redoing · 2026-08-18 · Phase 6
+
+**Symptom:** the finished Phase 6 table showed `fp16` with `ANLS 0.8889` against every quantized
+arm's ~0.44 — apparently saying quantization destroys quality catastrophically at *every* bit
+width, including INT8, which the fixture tests had already shown to be near-lossless.
+
+**Root cause, two layers deep.** The `fp16` row was measured by the **smoke test**
+(`--arms fp16 --n-queries 2 --trials 1`), which is the correct thing to run first and the correct
+settings for it. `0.8889` is two questions, and matched an already-known artifact bit-for-bit: the
+`n_scored: 2` row in `results/pruning_quality.jsonl` from COLAB step 6's smoke test. Same two
+queries, same unpruned model, same deterministic greedy decode.
+
+Then the full run resumed, saw a row for `("fp16", 16)` already in the file, and **skipped it** —
+because resumability tested *identity* ("has this arm been measured?") and never *adequacy*
+("was it measured to the standard this run is asking for?"). The one row that had to be redone was
+the only row guaranteed not to be.
+
+**Why it mattered more than a cosmetic mislabel:** `fp16` is the denominator of every `vs fp16`
+figure in the summary — both the speed ratio and the implicit quality comparison. One inadequate
+row silently contaminated the headline number of every other row.
+
+**Fix:** `completed_arms()` now takes the current `--n-queries` and `--trials` and counts a row as
+done only if it was measured to at least that standard; each row records `n_requested` so the
+comparison is possible at all. Rows predating those fields are trusted, since there is nothing to
+compare against and refusing to resume would be the worse failure.
+
+**Second-order fix, because the first one creates it:** the file is append-only, so re-measuring
+an arm leaves the superseded row in place. `summarise()` now keys by `(arm, bits)` and takes the
+last write — without that, re-running to *fix* an inadequate row would still print the inadequate
+one, which is worse than not fixing it at all.
+
+**Prevention:** four tests in `tests/test_quant_ablation.py` — a thinner row does not count as
+done, a more thorough one does, pre-field rows are trusted, and `summarise` prefers the newest
+measurement.
+
+**The general lesson, worth saying in an interview:** a resume key must encode *the conditions a
+result is valid under*, not just the identity of the thing measured. Cheap-smoke-test-then-full-run
+is a good habit that quietly plants a bad row in the output of the second one.
+
+**Cost:** 20 minutes, and one contaminated results table that was very nearly written up.
+
+---
+
+### B-09 · The prefill computed 641 MiB of logits and read one row · 2026-08-18 · Phase 6
+
+**Symptom:** none. Nothing crashed, nothing was wrong, every number was correct. The bug was
+found by *decomposing a measurement that had already been taken*: `results/quant_ablation.jsonl`
+records `peak_allocated_bytes` per arm, and subtracting the two terms that are known exactly —
+resident weights (ledger-confirmed to the byte) and the eagerly-preallocated 1.875 GiB block pool
+— leaves a residual of **0.95–0.98 GiB, near-identical across all seven arms**.
+
+Constant across arms is the clue. Weight precision changes from fp16 to INT4 and the residual
+does not move, so it is not weights and not anything downstream of them — it is a fixed cost of
+running one request.
+
+**Root cause:** `EdgeRagDecoder.forward` ended with `return self.lm_head(self.norm(hidden))`,
+computing logits for **every position**. At the measured 6,981-token prompt that is a
+`(1, 6981, 49280)` fp16 tensor = **641 MiB**, or 67% of the residual and **16% of the entire
+4 GiB budget**. Every consumer in the repo — `bench/pipeline.py`'s greedy loop, all three
+batched-decode tests — reads `logits[:, -1]` and nothing else. 6,980 of 6,981 rows were computed
+and discarded.
+
+**This is the third appearance of one pattern**, and that is the part worth saying out loud in an
+interview: materialise a large tensor, read a thin slice of it.
+
+| | what was materialised | what was read |
+|---|---|---|
+| `B-05` | `(heads, queries, keys)` attention scores, 9 GiB | nothing — SDPA never needs them |
+| `D17`/`last_row_scores` | the full score matrix, to rank visual tokens | one row |
+| `B-09` | `(seq, vocab)` logits, 641 MiB | one row |
+
+Each was found by a different method — an OOM, a memory-curve calculation, and now a residual
+subtraction — which is why it took three times to notice it was one pattern.
+
+**Fix:** `last_token_only=True` slices `hidden` to its final position *before* the norm and
+`lm_head`. Default stays `False` because `tests/test_equivalence.py` compares full-sequence logits
+against HuggingFace and that gate is worth more than a slice in a test; `bench/pipeline.py` opts
+in, so both Colab scripts get it.
+
+**Wrong theory, kept:** the first version of the test asserted the surviving row was *bit-identical*
+to the full tensor's last row, reasoning that each output row of a matmul depends only on its own
+input row. True of the mathematics, false of the implementation — a `(1,H) x (H,V)` GEMV
+accumulates differently from a `(S,H) x (H,V)` GEMM. Measured over 60 (seed, length) combinations:
+worst absolute difference **2.1e-06**, greedy token identical **60/60**. Same mechanism as `D18`
+(chunk boundaries change GEMM shape) and `P-28` (thread dispatch changes reduction order).
+Tolerances now come from that measurement rather than from whatever made the test green.
+
+**Prevention:** `tests/test_last_token_logits.py`, including a test that asserts the *saving
+itself* is still worth having — if a future vocabulary or `lm_head` change made this optimisation
+pointless, that test says so rather than leaving a parameter nobody questions.
+
+**Note for comparability:** every number in `results/quant_ablation.jsonl` and
+`results/pruning_quality.jsonl` was measured *before* this fix. Their `peak_allocated_bytes` are
+therefore ~0.64 GiB higher than the same run would now report. The fix makes the pipeline better
+and the historical peaks stale; both facts are true and the second one has to be stated wherever
+those files are quoted.
+
+**Cost:** 15 minutes to find (the measurement was already on disk), 30 to fix, test and write up.
+
+---
+
 ### B-08 · An hour of embedding, one bad line later, gone · 2026-08-18 · Phase 7
 
 **Symptom:** `scripts/measure_retrieval_recall.py`'s first real run embedded all 362 corpus

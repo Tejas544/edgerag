@@ -87,8 +87,11 @@ def generate(
     compressor = FastVCompressor(config, strategy=strategy) if config.enabled else None
 
     t0 = time.perf_counter()
+    # last_token_only: generation reads exactly one row of this, and materialising the other
+    # 6,980 costs 641 MiB on the measured prompt -- 16% of the whole budget (BUGS.md B-09).
     logits = decoder(
-        inputs_embeds=embeds, cache=cache, compressor=compressor, visual_mask=visual_mask
+        inputs_embeds=embeds, cache=cache, compressor=compressor, visual_mask=visual_mask,
+        last_token_only=True,
     )
     sync()  # not torch.cuda.synchronize(): this must be runnable on CPU so a test can cover it
     ttft = time.perf_counter() - t0

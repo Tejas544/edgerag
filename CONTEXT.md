@@ -1087,6 +1087,94 @@ confirming a full cache hit re-ran in seconds.
 
 ---
 
+## D23 · Phase 6 measured: the quality cliff is in the language model, not the tower · **MEASURED** · 2026-08-18
+
+T4, `results/quant_ablation.jsonl`, 40 held-out requests, workload `94b148a0b9f5006e`, pruning
+off (`keep_ratio=1.0`) so quantization is the only variable.
+
+| arm | bits | weights | ledger Δ | peak | tok/s | ANLS |
+|---|---:|---:|---:|---:|---:|---:|
+| fp16 | 16 | 4.185 G | **0 B** | 7.02 G | 14.04 | *(see B-10)* |
+| LM | 8 | 2.708 G | **0 B** | 5.54 G | 5.19 | **0.4378** |
+| LM+ViT | 8 | 2.435 G | **0 B** | 5.29 G | 5.16 | 0.4328 |
+| ViT | 8 | 3.911 G | **0 B** | 6.75 G | 13.74 | 0.4503 |
+| LM | 4 | 1.958 G | **0 B** | 4.79 G | 3.79 | 0.2469 |
+| LM+ViT | 4 | 1.546 G | **0 B** | 4.37 G | 3.31 | 0.2621 |
+| ViT | 4 | 3.772 G | **0 B** | 6.60 G | 11.90 | 0.4274 |
+
+### Finding 1 — the ledger was exactly right, on every arm, to the byte
+
+`ledger_delta_bytes: 0` for all seven. D21's weight arithmetic — computed locally from the
+checkpoint config on a `meta` device, with no weights loaded and no GPU — predicted what a loaded
+T4 model actually holds, exactly. This is the strongest single result of the phase: **the memory
+column of the Phase 6 gate never needed a GPU at all**, and now it is confirmed rather than
+merely asserted.
+
+### Finding 2 — INT8 is answer-identical; INT4 costs 44% of quality; the tower is nearly free
+
+`LM @ int8` scored **0.4378445165945166**, which is *bit-identical* to D20's fp16 baseline
+(`keep_ratio=1.0`, n=40, same 40 queries). Not "close" — the same 40 greedy answers, character for
+character. INT8 weight-only quantization of the language model is free on this workload.
+
+The INT4 arms separate the cliff cleanly:
+
+| what was quantized to INT4 | ANLS | vs fp16 baseline (0.4378) |
+|---|---:|---|
+| vision tower only | 0.4274 | **−2.4%**, inside n=40 noise |
+| language model only | 0.2469 | **−44%** |
+| both | 0.2621 | −40% |
+
+**The quality cliff lives entirely in the language decoder.** `PLAN.md` framed this ablation
+expecting the vision tower to carry it ("the vision tower is 12% of parameters but carries the
+quality cliff"); measured, the opposite is true. Two-thirds of the tower's linear weight was
+quantized to 4 bits — the ragged `fc2` layers that cannot be (D21 finding 2) are 32% of it — and
+quality moved less than the sampling noise.
+
+**Consequence: the arm grid as specified misses the best operating point.** Every arm applies one
+bit width to whatever it touches, so a *mixed-precision* configuration — INT8 language + INT4
+vision — is not in the table. From these numbers it should weigh 1.900 + 0.386 + 0.010 = **2.30
+GiB at essentially fp16 quality**, against LM+ViT@4's 1.55 GiB at 60% of quality. That is 0.75 GiB
+for +0.17 ANLS, and it is the configuration this project should ship. It is not measured yet;
+the runner needs per-component bit widths to express it.
+
+### Finding 3 — the throughput column is contaminated, and the ViT arms prove it
+
+Quantizing the vision tower **cannot** change decode throughput: the tower runs once during
+prefill and is not in the decode loop. That control was built in deliberately, and it fired:
+
+* `ViT @ int8` → **13.74** tok/s
+* `ViT @ int4` → **11.90** tok/s
+
+Both should equal the fp16 decode speed and each other. They differ by **13.4%**, which is
+squarely inside D14 finding 5b's measured 12–14% *cross-session* variance — and these two arms
+were measured in different Colab sessions, because the first run disconnected partway. The tok/s
+column therefore mixes sessions and carries that noise on every row.
+
+What survives: INT4 at ~3.3–3.8 tok/s against fp16's ~14 is a **~4×** regression, far outside 13%,
+exactly as D7 predicted for dequantize-then-matmul on a card with no INT4 tensor cores. What does
+*not* survive: any fine comparison, e.g. `LM@4` (3.79) vs `LM+ViT@4` (3.31). Those are ties.
+
+**D14 finding 5b restated and confirmed a second time: memory is bit-reproducible across sessions
+(ledger Δ = 0 everywhere), latency is not.** A clean latency column needs all seven arms
+re-measured inside one session.
+
+### Finding 4 — the measured peak replaced D21's inferred activation line, and it was wrong by 3×
+
+D21 had to *infer* the transient activation term (0.329 GiB ± 0.17) because the old harness
+recorded `prompt_tokens: -1`. This run records it (6,981), so the term can be decomposed exactly:
+
+```
+peak 7.021 GiB − weights 4.185 − preallocated pool 1.875 = 0.961 GiB
+```
+
+and it is **0.95–0.98 GiB on every arm**, near-constant as activation should be. The inference was
+low by ~3×. Chasing the constant residual is what found `BUGS.md` **B-09**: 641 MiB of it was a
+full-sequence logits tensor whose 6,980 non-final rows were computed and discarded — 16% of the
+whole 4 GiB budget. Fixed; the peaks in this table predate the fix and are ~0.64 GiB higher than
+the same run would now report.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |

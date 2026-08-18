@@ -216,13 +216,28 @@ def measure_arm(
     }
 
 
-def completed_arms(path: Path) -> set[tuple[str, int]]:
+def completed_arms(path: Path, n_queries: int, trials: int) -> set[tuple[str, int]]:
+    """Arms already measured **to at least the currently requested standard**.
+
+    Resuming on identity alone -- "a row for this arm exists, skip it" -- is what let a
+    two-query, one-trial smoke-test row for ``fp16`` survive a full 40-query run and then serve as
+    the denominator of every ``vs fp16`` figure in the summary table (``BUGS.md`` B-10). The row
+    was present, so it was skipped; it was inadequate, and nothing checked.
+
+    A row counts as done only if it was measured with at least this invocation's ``--n-queries``
+    and ``--trials``. Rows written before those fields were recorded are treated as adequate,
+    because there is nothing to compare them against and refusing to resume would be worse.
+    """
     if not path.exists():
         return set()
     done = set()
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            row = json.loads(line)
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        enough_queries = row.get("n_requested", n_queries) >= n_queries
+        enough_trials = row.get("trials", trials) >= trials
+        if enough_queries and enough_trials:
             done.add((row["arm"], row["bits"]))
     return done
 
@@ -278,9 +293,10 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.drive) if args.drive else (REPO_ROOT / "results")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "quant_ablation.jsonl"
-    done = completed_arms(out_path)
+    done = completed_arms(out_path, args.n_queries, args.trials)
     if done:
-        print(f"resuming: {len(done)} arm(s) already in {out_path.name}")
+        print(f"resuming: {len(done)} arm(s) already measured to this standard "
+              f"(n>={args.n_queries}, trials>={args.trials})")
     print()
 
     # fp16 is one arm regardless of bit width -- "quantize nothing at 4 bits" and "quantize
@@ -368,10 +384,22 @@ def summarise(out_path: Path, n_queries: int) -> int:
     how a leftover smoke-test row would get printed with a full run's sample-size caveat, or the
     reverse. The per-row ``n`` column is the only number that is ever true of the row it sits on.
     """
-    rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line]
-    if not rows:
+    parsed = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()
+              if line.strip()]
+    if not parsed:
         print("FAILED: nothing was measured. Do not use this file.", file=sys.stderr)
         return 1
+
+    # The file is append-only, so re-measuring an arm to a higher standard leaves the superseded
+    # row in place. Last write wins -- without this, re-running to *fix* an inadequate row would
+    # leave the table still reading the inadequate one, which is worse than not fixing it.
+    by_arm: dict[tuple[str, int], dict[str, Any]] = {}
+    for row in parsed:
+        by_arm[(row["arm"], row["bits"])] = row
+    rows = list(by_arm.values())
+    if len(parsed) > len(rows):
+        print(f"  ({len(parsed) - len(rows)} superseded row(s) in the file; using the latest "
+              "measurement of each arm)")
 
     baseline = next((r for r in rows if r["bits"] == 16), None)
     print(f"{'arm':>8}{'bits':>6}{'weights':>10}{'peak':>8}{'tok/s':>9}{'vs fp16':>9}"

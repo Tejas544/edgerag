@@ -78,6 +78,7 @@ class EdgeRagDecoder(nn.Module):
         cache: object | None = None,
         compressor: object | None = None,
         visual_mask: torch.Tensor | None = None,
+        last_token_only: bool = False,
     ) -> torch.Tensor:
         """Return logits of shape ``(batch, seq_len, vocab_size)``.
 
@@ -87,6 +88,20 @@ class EdgeRagDecoder(nn.Module):
         ``compressor`` enables FastV visual-token pruning (Phase 4). Pruning is a *forward-pass*
         concern rather than a cache one -- hidden states, positions, and the mask all shrink
         together at the cut layer -- which is why it lives here and not in the cache.
+
+        ``last_token_only`` returns ``(batch, 1, vocab_size)`` -- **the only row generation ever
+        reads**, and on a RAG prefill the difference is not small: at the measured 6,981-token
+        prompt the full tensor is ``6981 x 49280`` fp16 = **641 MiB, of which 6,980 rows are
+        discarded** (``BUGS.md`` B-09). That is 16% of the entire 4 GiB budget spent computing
+        logits for tokens that already exist.
+
+        Default ``False``, deliberately: ``tests/test_equivalence.py`` compares full-sequence
+        logits against HuggingFace, and that gate is worth more than saving a slice in a test.
+        Callers that generate opt in.
+
+        Slicing happens *before* the final norm rather than after, which is exactly equivalent --
+        ``RMSNorm`` reduces over the last dimension only, so each position is independent of every
+        other -- and skips the norm on the discarded rows too.
         """
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("pass exactly one of input_ids or inputs_embeds")
@@ -132,6 +147,8 @@ class EdgeRagDecoder(nn.Module):
                     keep.numel(), 0, hidden.dtype, hidden.device, None
                 )
 
+        if last_token_only:
+            hidden = hidden[:, -1:]
         return self.lm_head(self.norm(hidden))
 
 
