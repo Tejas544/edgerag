@@ -176,6 +176,19 @@ So: all eight arms, one session, two queries each, and the time saved buys **5 t
 It writes its own file rather than appending to the quality table: `summarise()` keeps the last
 row per arm, so a 2-query ANLS would quietly replace the 40-query numbers.
 
+**If the runtime is reclaimed part-way, that is expected and not a failure.** Eight sequential
+loads of a 4.5 GiB checkpoint is the longest-running cell in this runbook, and free Colab has
+reclaimed it twice. Every arm is fsync'd as it completes, so nothing is lost, and each now prints
+elapsed time plus free host/GPU memory — if a future run dies, that line distinguishes an
+environment quota from a leak instead of leaving it to guesswork.
+
+To finish an interrupted sweep, run the missing arms **with an `fp16` anchor in the same session**,
+into their own file. Ratios are then computed within each file rather than across them:
+
+```python
+!python -m scripts.colab_quant_ablation --drive /content/drive/MyDrive/edgerag     --out-name quant_latency_b.jsonl --arms fp16 ViT LM8+ViT4 --bits 8 --n-queries 2 --trials 5
+```
+
 **The last line is the point.** It must read `SINGLE SESSION (<id>)`. Every record now carries a
 `session_id` generated once per process, so "all eight arms in one session" is a property the file
 can be checked for rather than a claim about how you ran it. If it says `2 SESSIONS`, the run was

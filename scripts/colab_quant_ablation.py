@@ -37,6 +37,7 @@ import gc
 import json
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -127,6 +128,27 @@ def code_version() -> str:
         return result.stdout.strip() or "unknown"
     except (OSError, subprocess.SubprocessError):
         return "unknown"
+
+
+def host_and_gpu_free() -> str:
+    """Free host RAM and reserved GPU, for the line printed after every arm.
+
+    Eight sequential loads of a 4.5 GiB checkpoint is the longest-running thing in this project,
+    and when a run is reclaimed mid-way -- as one was, during arm 7's weight load -- there is no
+    way afterwards to tell an environment quota from a leak. One line per arm makes the next
+    interruption diagnosable rather than a guess.
+    """
+    parts = []
+    if torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / GIB
+        parts.append(f"gpu {torch.cuda.memory_reserved() / GIB:.1f}/{total:.1f} GiB reserved")
+    try:
+        import psutil
+
+        parts.append(f"host {psutil.virtual_memory().available / GIB:.1f} GiB free")
+    except ImportError:
+        pass
+    return ", ".join(parts) or "no memory info"
 
 
 def _vision_parts(hf_model: torch.nn.Module) -> tuple[torch.nn.Module, torch.nn.Module]:
@@ -380,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"resuming: {len(done)} arm(s) already measured to this standard "
               f"(n>={args.n_queries}, trials>={args.trials})")
     print()
+    run_started = time.perf_counter()
 
     # fp16 is one arm regardless of bit width -- "quantize nothing at 4 bits" and "quantize
     # nothing at 8 bits" are the same model, and running it twice would put two samples of the
@@ -454,8 +477,9 @@ def main(argv: list[str] | None = None) -> int:
         decode = record["decode_tokens_per_s"]
         print(f"    ANLS={record['anls']:.4f} (n={record['n_scored']})  "
               f"tok/s={decode['p50']:.2f}  TTFT={record['ttft_s']['p50']:.2f}s  "
-              f"peak={record['peak_allocated_bytes'] / GIB:.2f} GiB\n"
-              if decode else "    no decode samples\n")
+              f"peak={record['peak_allocated_bytes'] / GIB:.2f} GiB"
+              if decode else "    no decode samples")
+        print(f"    [{time.perf_counter() - run_started:.0f}s elapsed] {host_and_gpu_free()}\n")
 
         del decoder, lm
         gc.collect()
