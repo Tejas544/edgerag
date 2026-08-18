@@ -8,6 +8,64 @@ in December. **Write the entry while the diagnosis is fresh.**
 
 ---
 
+## The answer, if you only read one section
+
+**The single hardest bug was `B-05`: a quality run that measured nothing and reported it as a
+result.** It came back as a complete, well-formed results file — eleven rows, every strategy and
+ratio present, `anls: 0.0` on all of them. A tidy table saying visual-token pruning destroys answer
+quality at every ratio, *including the `keep_ratio=1.0` baseline that is proven bit-identical to no
+pruning at all*.
+
+Nothing crashed. Nothing was flagged. Had that file been believed, the Phase 4 conclusion would
+have been "FastV destroys quality on document RAG" — published, defended, and wrong.
+
+What made it hard is that the mechanical defect was trivial and the dangerous defect was not. The
+mechanical one: `generate()` allocated its own 3.2 GiB block pool per request on top of 4.18 GiB of
+weights, so every call raised `OutOfMemoryError`. The dangerous one: a bare `except: continue`
+swallowed all 660 of them, and the aggregation divided by an empty list into zeros. **A run that
+measured nothing was indistinguishable, in its output, from a run that measured something
+catastrophic.**
+
+The diagnosis was not clever. It was noticing that `keep_ratio=1.0` scored 0.0 when a test already
+proved that configuration is a no-op — an *internal contradiction in the results file*, visible
+without a debugger, a profiler, or the GPU that produced it. The fix that matters is not the block
+pool; it is that the script now **exits non-zero when `n_scored == 0`**, because a silently empty
+result is more dangerous than a crash: crashes get investigated, and tidy zeros get published.
+
+The other two worth knowing, chosen because each is a different *class* of failure:
+
+| | The failure | Why it is a different class |
+|---|---|---|
+| **`B-03`** | Forked sequences overwrote each other's KV — refcounts correct, data wrong | **Silent corruption.** No exception, no NaN; output stays fluent and becomes wrong. The only detector is a differential test against a known-good path. |
+| **`B-09`** | The prefill built a 641 MiB logits tensor and read one row of it | **Invisible waste.** Nothing was wrong — every number was correct. Found by *subtracting the knowns* from a measurement already on disk and asking what the constant remainder was. |
+
+`B-09` is also the third time one pattern appeared: materialise a large tensor, read a thin slice
+of it (`B-05`'s attention scores at 9 GiB, FastV's score matrix, then the logits). Three different
+discovery methods — an OOM, a memory-curve calculation, a residual subtraction — which is why it
+took three times to notice it was one pattern.
+
+---
+
+## Confirmed bugs at a glance
+
+Numbering is chronological, so the entries below read as the order they were found — Phase 1
+through Phase 7. The three that matter are the ones above.
+
+| # | Symptom | Class | Cost |
+|---|---|---|---|
+| [B-01](#b-01) | OCR text silently empty for every InfographicVQA page | silent data loss | 25 min |
+| [B-02](#b-02) | `rope_theta` defaulting to 10000 instead of 100000/130000 | config read, prevented | 15 min |
+| [B-03](#b-03) | Forked sequences overwrote each other's KV | **silent corruption** | 30 min |
+| [B-04](#b-04) | Chunked vision encoding was never called by a test, and was broken | untested code path | 1 T4 session |
+| [B-05](#b-05) | The quality run scored zero and reported it as a result | **measurement that measured nothing** | 2 T4 sessions |
+| [B-06](#b-06) | A test that failed one run in four, at exactly its own threshold | flaky by construction | 20 min |
+| [B-07](#b-07) | The suite could not finish, and the documented theory was wrong | wrong diagnosis on file | 40 min |
+| [B-08](#b-08) | An hour of embedding thrown away by a bug one loop later | no checkpoint | 76 min |
+| [B-09](#b-09) | The prefill computed 641 MiB of logits and read one row | **invisible waste** | 45 min |
+| [B-10](#b-10) | Resumability skipped the row that most needed redoing | stale-by-construction input | 20 min |
+
+---
+
 ## Entry format
 
 ```
@@ -25,6 +83,8 @@ in December. **Write the entry while the diagnosis is fresh.**
 ---
 
 ## Confirmed bugs
+
+<a id="b-01"></a>
 
 ### B-01 · OCR text silently empty for every InfographicVQA page · 2026-08-09 · Phase 1
 
@@ -68,6 +128,156 @@ read `payload["LINE"]`, with a fallback to a flat `Blocks` array. `edgerag/retri
 be validated by "it ran." It needs a *coverage* assertion at the call site. This applies directly
 to the Phase 3 allocator, where `free()` on an already-free block is the same shape of bug —
 plausible state, no exception, wrong answer.
+
+---
+
+<a id="b-02"></a>
+
+### B-02 · `rope_theta` silently defaulting to 10000 instead of 100000/130000 · 2026-08-10 · Phase 2
+
+**Symptom:** none yet — caught by probing the config before writing RoPE, not by debugging output.
+Had it shipped, the symptom would have been a model that loads, runs, and emits fluent, confident,
+wrong text.
+
+**Wrong theory (the one this narrowly avoided):** that `rope_theta` behaves like every other field
+and can be read with `getattr(text_config, "rope_theta", 10000.0)`. It returns `None`, so the
+default applies.
+
+**Root cause:** in transformers v5 the value moved into a nested dict —
+`text_config.rope_parameters["rope_theta"]`. The actual values are **100000** for SmolVLM2-256M and
+**130000** for SmolVLM2-2.2B. The library default of 10000 is therefore wrong by 10–13×, *and the
+two checkpoints disagree with each other*, so hardcoding a constant would have been wrong too.
+
+**Why it would have been expensive:** a wrong RoPE base does not crash, does not NaN, and does not
+fail a shape check. It changes the frequency at which positions rotate, so the model attends to
+subtly wrong relative positions. The output is grammatical. The natural diagnosis is "my RoPE
+implementation is wrong" (`BUGS.md` P-09) and the search goes to `rotate_half`, the `unsqueeze_dim`,
+the position offset — anywhere except the config reader, which "obviously works" because every
+other field it reads is correct.
+
+**Diagnosis:** printing every architectural constant needed for the reimplementation *before*
+writing any of it, and reading the values rather than scanning for `None`.
+
+**Fix:** `_read_rope_theta` in `edgerag/core/spec.py` reads `rope_parameters` first, falls back to
+the direct attribute, and **raises rather than defaulting** if neither exists.
+
+**Prevention:** no silent default. Pinned values for both tiers in `tests/test_spec.py`, so a
+checkpoint changing shape under us fails a test. Same treatment applied to `rms_norm_eps` — Llama's
+library default is 1e-6 but every SmolVLM checkpoint ships **1e-5**, which is the identical trap one
+constant over.
+
+**Cost:** ~15 min, entirely in prevention. Zero debugging.
+
+**The transferable lesson — this is the second instance of one pattern.** L-01 (`pad_token_id`) and
+B-02 (`rope_theta`) are the same bug: *the composite config and the nested config disagree, and the
+obvious read returns the wrong one.* For a value that will be silently wrong rather than loudly
+absent, `getattr(cfg, name, default)` is not a safe idiom — the default is the failure.
+
+---
+
+<a id="b-03"></a>
+
+### B-03 · Forked sequences overwrote each other's KV — refcounts were right, data was not · 2026-08-10 · Phase 3c
+
+**Symptom:** none visible in the test suite. 53 paged-cache tests passed, including every fork and
+copy-on-write test. The defect was found by deliberately probing the data path that the
+bookkeeping tests did not touch.
+
+**Wrong theory:** that Phase 3b was complete because `fork`, `unshare`, and `writable_block_for`
+were implemented and tested. They were — and `PagedKVCache._write` never called any of them. It
+indexed `self.table.blocks` directly, so a forked sequence appended straight into blocks its
+sibling was still reading.
+
+**Root cause:** two of them, and the second only appears once the first is fixed.
+
+1. **The write path bypassed copy-on-write entirely.** The CoW machinery existed at the
+   `BlockTable` layer; the tensor writes went around it.
+2. **`unshare` repoints the mapping but does not copy the block's contents.** Fixing (1) alone
+   gives the forked sequence a private block full of **zeros** — a valid-looking mapping to data
+   that was never written. The answer degrades; nothing crashes.
+
+**Why the existing tests missed it:** they asserted on refcounts. Refcounting was correct
+throughout. `test_fork_shares_blocks_without_copying` and `test_writing_to_a_forked_block_splits_it`
+both passed against a cache that corrupted real KV, because neither looked at a tensor.
+
+**Diagnosis, and the part worth remembering:** the first reproduction attempt *failed*. Forking,
+then appending only from the child, left the parent intact — because `gather` slices to the
+parent's own `num_tokens`, so the child's write landed in slack the parent never reads. It looked
+like CoW was working. The giveaway was `copy_on_writes == 0`: the parent survived by luck, not by
+correctness. **Corruption needs both siblings to append** — the second writer overwrites the
+first's tokens, and the first then reads the second's data. Asymmetric bugs like this are why
+"I could not reproduce it" is weak evidence.
+
+**Fix:** `PagedKVCache._unshare_write_range` walks every logical block the write will touch, calls
+`unshare`, and on a split copies that block's KV across **all layers at once**. Done at layer 0 —
+splitting per layer would leave layers disagreeing about which block holds the sequence.
+`edgerag/cache/paged.py`.
+
+**Prevention:** `tests/test_cow.py` asserts on **tensor contents**, not refcounts: both siblings
+append, and each must see its own tokens and none of the other's. Plus the exact-multiple case,
+where no partial tail exists and CoW must *not* fire.
+
+**Cost:** ~30 min, all of it in finding a reproduction that actually failed.
+
+**The transferable lesson:** correct bookkeeping is not correct behaviour. Every allocator test in
+this project passes against a cache that serves the wrong data, because refcounts and tensors are
+different subsystems. Any test suite for a memory manager needs at least one assertion on the
+bytes.
+
+---
+
+<a id="b-04"></a>
+
+### B-04 · Chunked vision encoding was never called by any test, and was broken · 2026-08-10 · Phase 4
+
+**Symptom:** `IndexError: The shape of the mask [8, 147456] at index 1 does not match the shape of
+the indexed tensor [8, 729] at index 1`, raised on a Colab T4 **after a 9 GB model download**, on
+the first real invocation of a function written two phases earlier.
+
+**Root cause:** `encode_images_chunked` passed a **pixel-resolution** mask (384×384 = 147,456)
+where the vision tower expects a **patch-resolution** one (27×27 = 729). HuggingFace's own
+`get_image_features` builds the pixel mask and then *unfolds* it by `patch_size` to get the patch
+grid; I built the pixel mask and passed it straight through, skipping the unfold.
+
+**Why it survived 267 tests:** **nothing in the suite ever called it.** The local tests build
+synthetic token ids and never pass a real image through the vision path, so the entire function
+was dead code as far as CI was concerned. It was written in Phase 2 to implement `CONTEXT.md` D12
+and first executed in Phase 4, on the user's GPU quota.
+
+**Fix:** mirror HF's `unfold(dim=1, size=p, step=p).unfold(dim=2, size=p, step=p).sum(...) > 0`.
+Using the same construction rather than `H // p` also keeps the two in step when the image
+dimension is not an exact multiple of the patch size — 384/14 is 27.4, and both forms happen to
+give 27 here, but only one of them is guaranteed to keep matching.
+
+**Prevention — three tests that should have existed since Phase 2:**
+- our chunked encoding equals HF's `get_image_features` **bit-exactly**;
+- chunk size does not change the result (this is D12's whole claim, previously unverified);
+- the number of image features equals the number of `<image>` token slots, which is the cheap
+  invariant that also catches `P-11` and `P-26`.
+
+**It also corrected a claim — twice, which is the instructive part.** D12 said chunking was
+*"exactly equivalent"*. The first test run, on a large image, appeared to confirm bit-exactness
+for chunk sizes ≥3, and I wrote that down as a property. A smaller image then produced a trailing
+**batch-1 chunk**, which takes a different GEMM path, and the claim collapsed at ~5e-06.
+
+The correct statement is: chunking is *mathematically* equivalent and agrees to ~5e-06. Any input
+whose sub-image count is not a multiple of the chunk size ends with a partial chunk, so
+bit-exactness was never a property — it was a coincidence of one input that happened to divide
+evenly. See also `P-28`, which is why the same test then failed only under system load.
+
+**Cost:** one wasted T4 session and a 9 GB download — the user's scarce free-tier quota, which is
+the expensive part.
+
+**The transferable lesson, and it is the sharpest one so far:** a decision log entry asserting
+*"chunking is exactly equivalent"* is worthless if nothing executes the code it describes. Test
+count is not coverage. Before this, three separate documents (D12, the module docstring, the
+commit message) all confidently described the behaviour of a function that had never once run.
+**Any code path whose only caller lives in a script rather than a test is untested**, however
+carefully it is documented.
+
+---
+
+<a id="b-05"></a>
 
 ### B-05 · The quality run scored zero requests and reported it as a result · 2026-08-11 · Phase 4
 
@@ -153,145 +363,38 @@ measure anything?" gate before it writes.
 
 ---
 
-### B-04 · Chunked vision encoding was never called by any test, and was broken · 2026-08-10 · Phase 4
+<a id="b-06"></a>
 
-**Symptom:** `IndexError: The shape of the mask [8, 147456] at index 1 does not match the shape of
-the indexed tensor [8, 729] at index 1`, raised on a Colab T4 **after a 9 GB model download**, on
-the first real invocation of a function written two phases earlier.
+### B-06 · A quantization test that failed one run in four, at exactly its own threshold · 2026-08-17 · Phase 6
 
-**Root cause:** `encode_images_chunked` passed a **pixel-resolution** mask (384×384 = 147,456)
-where the vision tower expects a **patch-resolution** one (27×27 = 729). HuggingFace's own
-`get_image_features` builds the pixel mask and then *unfolds* it by `patch_size` to get the patch
-grid; I built the pixel mask and passed it straight through, skipping the unfold.
+**Symptom:** `test_quant_linear_matches_fp16_within_quantization_error` failed with "quantized
+output drifted 12.0%" against a bound of 12%. Re-running passed. Re-running again passed. The
+fourth run failed.
 
-**Why it survived 267 tests:** **nothing in the suite ever called it.** The local tests build
-synthetic token ids and never pass a real image through the vision path, so the entire function
-was dead code as far as CI was concerned. It was written in Phase 2 to implement `CONTEXT.md` D12
-and first executed in Phase 4, on the user's GPU quota.
+**Wrong theory:** that the new bias support had changed the no-bias path — the failure appeared in
+the same session as that change, which is the most seductive kind of coincidence. It had not: with
+`bias=None` the forward is the identical `F.linear` call, and the test sits above the new tests in
+file order, so it draws the same RNG state it always did.
 
-**Fix:** mirror HF's `unfold(dim=1, size=p, step=p).unfold(dim=2, size=p, step=p).sum(...) > 0`.
-Using the same construction rather than `H // p` also keeps the two in step when the image
-dimension is not an exact multiple of the patch size — 384/14 is 27.4, and both forms happen to
-give 27 here, but only one of them is guaranteed to keep matching.
+**Root cause:** the weights were seeded and **the activations were not**. `x = torch.randn(4, 256)`
+drew from the global RNG, so each run measured a different input, and the 0.12 bound sat within a
+few thousandths of the mean outcome. The test was a coin flip weighted about 3:1.
 
-**Prevention — three tests that should have existed since Phase 2:**
-- our chunked encoding equals HF's `get_image_features` **bit-exactly**;
-- chunk size does not change the result (this is D12's whole claim, previously unverified);
-- the number of image features equals the number of `<image>` token slots, which is the cheap
-  invariant that also catches `P-11` and `P-26`.
+**Diagnosis:** ran the single test four times. A failure rate is a diagnosis; a stack trace is not.
 
-**It also corrected a claim — twice, which is the instructive part.** D12 said chunking was
-*"exactly equivalent"*. The first test run, on a large image, appeared to confirm bit-exactness
-for chunk sizes ≥3, and I wrote that down as a property. A smaller image then produced a trailing
-**batch-1 chunk**, which takes a different GEMM path, and the claim collapsed at ~5e-06.
+**Fix:** a seeded `_activations()` helper, used by every value-asserting test in the file.
+**The tolerance was not touched.** Loosening a bound to stop a flake destroys the thing the bound
+was measuring — this file's bounds are set from 4-bit theory (`test_round_trip_error_matches_4bit_theory`),
+so a bound wide enough to never flake would also be wide enough to accept a broken quantizer.
 
-The correct statement is: chunking is *mathematically* equivalent and agrees to ~5e-06. Any input
-whose sub-image count is not a multiple of the chunk size ends with a partial chunk, so
-bit-exactness was never a property — it was a coincidence of one input that happened to divide
-evenly. See also `P-28`, which is why the same test then failed only under system load.
+**Prevention:** the helper's docstring says why it is seeded, so the next person to add a test to
+this file does not reintroduce it.
 
-**Cost:** one wasted T4 session and a 9 GB download — the user's scarce free-tier quota, which is
-the expensive part.
-
-**The transferable lesson, and it is the sharpest one so far:** a decision log entry asserting
-*"chunking is exactly equivalent"* is worthless if nothing executes the code it describes. Test
-count is not coverage. Before this, three separate documents (D12, the module docstring, the
-commit message) all confidently described the behaviour of a function that had never once run.
-**Any code path whose only caller lives in a script rather than a test is untested**, however
-carefully it is documented.
+**Cost:** 20 minutes, all of it in the wrong theory.
 
 ---
 
-### B-03 · Forked sequences overwrote each other's KV — refcounts were right, data was not · 2026-08-10 · Phase 3c
-
-**Symptom:** none visible in the test suite. 53 paged-cache tests passed, including every fork and
-copy-on-write test. The defect was found by deliberately probing the data path that the
-bookkeeping tests did not touch.
-
-**Wrong theory:** that Phase 3b was complete because `fork`, `unshare`, and `writable_block_for`
-were implemented and tested. They were — and `PagedKVCache._write` never called any of them. It
-indexed `self.table.blocks` directly, so a forked sequence appended straight into blocks its
-sibling was still reading.
-
-**Root cause:** two of them, and the second only appears once the first is fixed.
-
-1. **The write path bypassed copy-on-write entirely.** The CoW machinery existed at the
-   `BlockTable` layer; the tensor writes went around it.
-2. **`unshare` repoints the mapping but does not copy the block's contents.** Fixing (1) alone
-   gives the forked sequence a private block full of **zeros** — a valid-looking mapping to data
-   that was never written. The answer degrades; nothing crashes.
-
-**Why the existing tests missed it:** they asserted on refcounts. Refcounting was correct
-throughout. `test_fork_shares_blocks_without_copying` and `test_writing_to_a_forked_block_splits_it`
-both passed against a cache that corrupted real KV, because neither looked at a tensor.
-
-**Diagnosis, and the part worth remembering:** the first reproduction attempt *failed*. Forking,
-then appending only from the child, left the parent intact — because `gather` slices to the
-parent's own `num_tokens`, so the child's write landed in slack the parent never reads. It looked
-like CoW was working. The giveaway was `copy_on_writes == 0`: the parent survived by luck, not by
-correctness. **Corruption needs both siblings to append** — the second writer overwrites the
-first's tokens, and the first then reads the second's data. Asymmetric bugs like this are why
-"I could not reproduce it" is weak evidence.
-
-**Fix:** `PagedKVCache._unshare_write_range` walks every logical block the write will touch, calls
-`unshare`, and on a split copies that block's KV across **all layers at once**. Done at layer 0 —
-splitting per layer would leave layers disagreeing about which block holds the sequence.
-`edgerag/cache/paged.py`.
-
-**Prevention:** `tests/test_cow.py` asserts on **tensor contents**, not refcounts: both siblings
-append, and each must see its own tokens and none of the other's. Plus the exact-multiple case,
-where no partial tail exists and CoW must *not* fire.
-
-**Cost:** ~30 min, all of it in finding a reproduction that actually failed.
-
-**The transferable lesson:** correct bookkeeping is not correct behaviour. Every allocator test in
-this project passes against a cache that serves the wrong data, because refcounts and tensors are
-different subsystems. Any test suite for a memory manager needs at least one assertion on the
-bytes.
-
----
-
-### B-02 · `rope_theta` silently defaulting to 10000 instead of 100000/130000 · 2026-08-10 · Phase 2
-
-**Symptom:** none yet — caught by probing the config before writing RoPE, not by debugging output.
-Had it shipped, the symptom would have been a model that loads, runs, and emits fluent, confident,
-wrong text.
-
-**Wrong theory (the one this narrowly avoided):** that `rope_theta` behaves like every other field
-and can be read with `getattr(text_config, "rope_theta", 10000.0)`. It returns `None`, so the
-default applies.
-
-**Root cause:** in transformers v5 the value moved into a nested dict —
-`text_config.rope_parameters["rope_theta"]`. The actual values are **100000** for SmolVLM2-256M and
-**130000** for SmolVLM2-2.2B. The library default of 10000 is therefore wrong by 10–13×, *and the
-two checkpoints disagree with each other*, so hardcoding a constant would have been wrong too.
-
-**Why it would have been expensive:** a wrong RoPE base does not crash, does not NaN, and does not
-fail a shape check. It changes the frequency at which positions rotate, so the model attends to
-subtly wrong relative positions. The output is grammatical. The natural diagnosis is "my RoPE
-implementation is wrong" (`BUGS.md` P-09) and the search goes to `rotate_half`, the `unsqueeze_dim`,
-the position offset — anywhere except the config reader, which "obviously works" because every
-other field it reads is correct.
-
-**Diagnosis:** printing every architectural constant needed for the reimplementation *before*
-writing any of it, and reading the values rather than scanning for `None`.
-
-**Fix:** `_read_rope_theta` in `edgerag/core/spec.py` reads `rope_parameters` first, falls back to
-the direct attribute, and **raises rather than defaulting** if neither exists.
-
-**Prevention:** no silent default. Pinned values for both tiers in `tests/test_spec.py`, so a
-checkpoint changing shape under us fails a test. Same treatment applied to `rms_norm_eps` — Llama's
-library default is 1e-6 but every SmolVLM checkpoint ships **1e-5**, which is the identical trap one
-constant over.
-
-**Cost:** ~15 min, entirely in prevention. Zero debugging.
-
-**The transferable lesson — this is the second instance of one pattern.** L-01 (`pad_token_id`) and
-B-02 (`rope_theta`) are the same bug: *the composite config and the nested config disagree, and the
-obvious read returns the wrong one.* For a value that will be silently wrong rather than loudly
-absent, `getattr(cfg, name, default)` is not a safe idiom — the default is the failure.
-
----
+<a id="b-07"></a>
 
 ### B-07 · The test suite could not finish, and the accumulation theory was wrong · 2026-08-17 · Phase 6
 
@@ -337,48 +440,49 @@ model fixture will copy the block above it.
 
 ---
 
-### B-10 · Resumability skipped the row that most needed redoing · 2026-08-18 · Phase 6
+<a id="b-08"></a>
 
-**Symptom:** the finished Phase 6 table showed `fp16` with `ANLS 0.8889` against every quantized
-arm's ~0.44 — apparently saying quantization destroys quality catastrophically at *every* bit
-width, including INT8, which the fixture tests had already shown to be near-lossless.
+### B-08 · An hour of embedding, one bad line later, gone · 2026-08-18 · Phase 7
 
-**Root cause, two layers deep.** The `fp16` row was measured by the **smoke test**
-(`--arms fp16 --n-queries 2 --trials 1`), which is the correct thing to run first and the correct
-settings for it. `0.8889` is two questions, and matched an already-known artifact bit-for-bit: the
-`n_scored: 2` row in `results/pruning_quality.jsonl` from COLAB step 6's smoke test. Same two
-queries, same unpruned model, same deterministic greedy decode.
+**Symptom:** `scripts/measure_retrieval_recall.py`'s first real run embedded all 362 corpus
+documents (56 minutes on a GTX 1650) without incident, then crashed one loop later --
+`AttributeError: 'SmolVLMForConditionalGeneration' object has no attribute 'embed_tokens'` --
+inside the query-embedding step. Nothing had been written to disk. The 56 minutes had to be
+redone from nothing.
 
-Then the full run resumed, saw a row for `("fp16", 16)` already in the file, and **skipped it** —
-because resumability tested *identity* ("has this arm been measured?") and never *adequacy*
-("was it measured to the standard this run is asking for?"). The one row that had to be redone was
-the only row guaranteed not to be.
+**Root cause:** `embed_query_for_image_space` needs `embed_tokens` on *our* decoder (built by
+`load_from_hf`), because that is the layer being reused to project query text into the same space
+`embed_image` puts document vectors in. `main()` had only ever built the raw HF model and passed
+that through to both embedding calls. `embed_image` is correct to take the raw HF module -- it
+drives `encode_images_chunked`, which expects HF's own tree -- but the query-side call needed a
+different object, and the two calls were given the same one.
 
-**Why it mattered more than a cosmetic mislabel:** `fp16` is the denominator of every `vs fp16`
-figure in the summary — both the speed ratio and the implicit quality comparison. One inadequate
-row silently contaminated the headline number of every other row.
+**Diagnosis:** the traceback named the exact line and the exact wrong type; no investigation
+needed beyond reading it. The interesting part is what a dry run had already NOT caught: an
+earlier smoke test of this script's glue logic had stubbed `embed_query_for_image_space` at the
+module level to validate everything else (corpus loading, path resolution, JSON output) in
+seconds instead of an hour. The stub's signature accepted whatever `main()` passed without caring
+what type it was -- which is exactly the boundary the real bug lived on. Stubbing a function to
+speed up a dry run can silently erase a real call-site error at the one place it would have shown
+up. The lesson generalises past this one script: a stub that never inspects its arguments passes
+a bad argument as readily as a good one.
 
-**Fix:** `completed_arms()` now takes the current `--n-queries` and `--trials` and counts a row as
-done only if it was measured to at least that standard; each row records `n_requested` so the
-comparison is possible at all. Rows predating those fields are trusted, since there is nothing to
-compare against and refusing to resume would be the worse failure.
+**Fix:** build `decoder = load_from_hf(lm.spec, lm.model)` once in `main()` and pass it to the
+query-embedding call; `embed_image` keeps the raw HF module. Confirmed by re-running the dry-run
+smoke test a second way -- stubbing only the expensive `embed_image` call and letting the real
+`embed_query_for_image_space` run against a real decoder, which is the one path the first stub
+had accidentally protected from ever being exercised.
 
-**Second-order fix, because the first one creates it:** the file is append-only, so re-measuring
-an arm leaves the superseded row in place. `summarise()` now keys by `(arm, bits)` and takes the
-last write — without that, re-running to *fix* an inadequate row would still print the inadequate
-one, which is worse than not fixing it at all.
+**Prevention:** document embeddings are now cached to `results/embedding_cache/<model>.jsonl`,
+appended and `flush()`ed after every document, so a failure anywhere after the embedding loop
+never re-pays the vision-tower cost. Verified load-bearing, not decorative: patched `embed_image`
+to raise on any call and reran against a full cache -- zero calls, correct output.
 
-**Prevention:** four tests in `tests/test_quant_ablation.py` — a thinner row does not count as
-done, a more thorough one does, pre-field rows are trusted, and `summarise` prefers the newest
-measurement.
-
-**The general lesson, worth saying in an interview:** a resume key must encode *the conditions a
-result is valid under*, not just the identity of the thing measured. Cheap-smoke-test-then-full-run
-is a good habit that quietly plants a bad row in the output of the second one.
-
-**Cost:** 20 minutes, and one contaminated results table that was very nearly written up.
+**Cost:** 56 minutes lost, ~20 minutes to fix and re-verify.
 
 ---
+
+<a id="b-09"></a>
 
 ### B-09 · The prefill computed 641 MiB of logits and read one row · 2026-08-18 · Phase 6
 
@@ -450,72 +554,48 @@ those files are quoted.
 
 ---
 
-### B-08 · An hour of embedding, one bad line later, gone · 2026-08-18 · Phase 7
+<a id="b-10"></a>
 
-**Symptom:** `scripts/measure_retrieval_recall.py`'s first real run embedded all 362 corpus
-documents (56 minutes on a GTX 1650) without incident, then crashed one loop later --
-`AttributeError: 'SmolVLMForConditionalGeneration' object has no attribute 'embed_tokens'` --
-inside the query-embedding step. Nothing had been written to disk. The 56 minutes had to be
-redone from nothing.
+### B-10 · Resumability skipped the row that most needed redoing · 2026-08-18 · Phase 6
 
-**Root cause:** `embed_query_for_image_space` needs `embed_tokens` on *our* decoder (built by
-`load_from_hf`), because that is the layer being reused to project query text into the same space
-`embed_image` puts document vectors in. `main()` had only ever built the raw HF model and passed
-that through to both embedding calls. `embed_image` is correct to take the raw HF module -- it
-drives `encode_images_chunked`, which expects HF's own tree -- but the query-side call needed a
-different object, and the two calls were given the same one.
+**Symptom:** the finished Phase 6 table showed `fp16` with `ANLS 0.8889` against every quantized
+arm's ~0.44 — apparently saying quantization destroys quality catastrophically at *every* bit
+width, including INT8, which the fixture tests had already shown to be near-lossless.
 
-**Diagnosis:** the traceback named the exact line and the exact wrong type; no investigation
-needed beyond reading it. The interesting part is what a dry run had already NOT caught: an
-earlier smoke test of this script's glue logic had stubbed `embed_query_for_image_space` at the
-module level to validate everything else (corpus loading, path resolution, JSON output) in
-seconds instead of an hour. The stub's signature accepted whatever `main()` passed without caring
-what type it was -- which is exactly the boundary the real bug lived on. Stubbing a function to
-speed up a dry run can silently erase a real call-site error at the one place it would have shown
-up. The lesson generalises past this one script: a stub that never inspects its arguments passes
-a bad argument as readily as a good one.
+**Root cause, two layers deep.** The `fp16` row was measured by the **smoke test**
+(`--arms fp16 --n-queries 2 --trials 1`), which is the correct thing to run first and the correct
+settings for it. `0.8889` is two questions, and matched an already-known artifact bit-for-bit: the
+`n_scored: 2` row in `results/pruning_quality.jsonl` from COLAB step 6's smoke test. Same two
+queries, same unpruned model, same deterministic greedy decode.
 
-**Fix:** build `decoder = load_from_hf(lm.spec, lm.model)` once in `main()` and pass it to the
-query-embedding call; `embed_image` keeps the raw HF module. Confirmed by re-running the dry-run
-smoke test a second way -- stubbing only the expensive `embed_image` call and letting the real
-`embed_query_for_image_space` run against a real decoder, which is the one path the first stub
-had accidentally protected from ever being exercised.
+Then the full run resumed, saw a row for `("fp16", 16)` already in the file, and **skipped it** —
+because resumability tested *identity* ("has this arm been measured?") and never *adequacy*
+("was it measured to the standard this run is asking for?"). The one row that had to be redone was
+the only row guaranteed not to be.
 
-**Prevention:** document embeddings are now cached to `results/embedding_cache/<model>.jsonl`,
-appended and `flush()`ed after every document, so a failure anywhere after the embedding loop
-never re-pays the vision-tower cost. Verified load-bearing, not decorative: patched `embed_image`
-to raise on any call and reran against a full cache -- zero calls, correct output.
+**Why it mattered more than a cosmetic mislabel:** `fp16` is the denominator of every `vs fp16`
+figure in the summary — both the speed ratio and the implicit quality comparison. One inadequate
+row silently contaminated the headline number of every other row.
 
-**Cost:** 56 minutes lost, ~20 minutes to fix and re-verify.
+**Fix:** `completed_arms()` now takes the current `--n-queries` and `--trials` and counts a row as
+done only if it was measured to at least that standard; each row records `n_requested` so the
+comparison is possible at all. Rows predating those fields are trusted, since there is nothing to
+compare against and refusing to resume would be the worse failure.
 
----
+**Second-order fix, because the first one creates it:** the file is append-only, so re-measuring
+an arm leaves the superseded row in place. `summarise()` now keys by `(arm, bits)` and takes the
+last write — without that, re-running to *fix* an inadequate row would still print the inadequate
+one, which is worse than not fixing it at all.
 
-### B-06 · A quantization test that failed one run in four, at exactly its own threshold · 2026-08-17 · Phase 6
+**Prevention:** four tests in `tests/test_quant_ablation.py` — a thinner row does not count as
+done, a more thorough one does, pre-field rows are trusted, and `summarise` prefers the newest
+measurement.
 
-**Symptom:** `test_quant_linear_matches_fp16_within_quantization_error` failed with "quantized
-output drifted 12.0%" against a bound of 12%. Re-running passed. Re-running again passed. The
-fourth run failed.
+**The general lesson, worth saying in an interview:** a resume key must encode *the conditions a
+result is valid under*, not just the identity of the thing measured. Cheap-smoke-test-then-full-run
+is a good habit that quietly plants a bad row in the output of the second one.
 
-**Wrong theory:** that the new bias support had changed the no-bias path — the failure appeared in
-the same session as that change, which is the most seductive kind of coincidence. It had not: with
-`bias=None` the forward is the identical `F.linear` call, and the test sits above the new tests in
-file order, so it draws the same RNG state it always did.
-
-**Root cause:** the weights were seeded and **the activations were not**. `x = torch.randn(4, 256)`
-drew from the global RNG, so each run measured a different input, and the 0.12 bound sat within a
-few thousandths of the mean outcome. The test was a coin flip weighted about 3:1.
-
-**Diagnosis:** ran the single test four times. A failure rate is a diagnosis; a stack trace is not.
-
-**Fix:** a seeded `_activations()` helper, used by every value-asserting test in the file.
-**The tolerance was not touched.** Loosening a bound to stop a flake destroys the thing the bound
-was measuring — this file's bounds are set from 4-bit theory (`test_round_trip_error_matches_4bit_theory`),
-so a bound wide enough to never flake would also be wide enough to accept a broken quantizer.
-
-**Prevention:** the helper's docstring says why it is seeded, so the next person to add a test to
-this file does not reintroduce it.
-
-**Cost:** 20 minutes, all of it in the wrong theory.
+**Cost:** 20 minutes, and one contaminated results table that was very nearly written up.
 
 ---
 
@@ -560,6 +640,37 @@ when a symptom below shows up, the diagnosis takes minutes instead of hours; and
 *doesn't* occur is evidence the design avoided it.
 
 Move an entry up to **Confirmed** with a full write-up when it actually bites.
+
+### Scorecard: 28 predictions against 10 real bugs
+
+Worth keeping honest, because the interesting number is not how many were right.
+
+**Predicted and prevented before they could bite — the list working as intended.** `P-20`
+(wrong-axis group scales) was caught by a round-trip test asserting on error *magnitude* rather
+than shape, in milliseconds, before any end-to-end eval. `P-17` (GPU work on the event loop) never
+happened because the engine was built around the prediction. `P-13`/`P-14` (missing `synchronize`,
+unreset peak counters) were designed out of the harness before the first measurement.
+
+**Predicted, and still cost real time.** `P-25` — the budget assembled from weights + KV and blown
+by transient activations — was written down in advance and still fired twice: once on the fixture
+(D12), and again in `B-05`, whose OOM was exactly this. Knowing a failure mode does not prevent it;
+it only shortens the diagnosis.
+
+**One prediction named the right file and the wrong cause, and cost more than having no prediction
+would have.** `P-27` said the suite was slow and held four model copies. When the suite started
+dying, that entry was sitting there looking like a diagnosis — right file, plausible mechanism,
+prescribed fix. It was wrong. Measuring RSS per test took two minutes and showed memory *flat*
+between modules; the real cause was an fp32 eager vision tower inside one file (`B-07`). **A stale
+prediction that reads like a diagnosis is worse than a blank page**, because it buys agreement
+instead of measurement.
+
+**Six of the ten confirmed bugs were not predicted at all** — `B-01`, `B-06`, `B-08`, `B-09`,
+`B-10`, and the *reporting* half of `B-05`. They cluster somewhere the prediction list has no
+entries: not in the model, the cache or the kernels, but in **the machinery that produces and
+records results**. Empty parses that return a valid default, thresholds that flake, expensive work
+with no checkpoint, resume keys that skip the row that needed redoing, a results file that mixes
+two code versions. The list predicted the systems programming and missed the experiment
+management — which is where more than half the time actually went.
 
 ### Paged KV cache — where the real pain is
 
@@ -622,13 +733,20 @@ Gets worse in Phase 4, where pruning *changes* the count and the expansion logic
 **P-12 · Missing `torch.inference_mode()`.** Autograd graph retained → roughly 2× memory. Under a
 4 GB budget this reads as "the model doesn't fit" rather than "I forgot a decorator."
 
-**P-25 · Budget assembled from weights + KV, blown by transient activations.** ⚠️ *measured, see
-`CONTEXT.md` D12* — the 256M fixture peaks at 2.7 GiB on a k=5 prompt, of which ~2.0 GiB is
+**P-25 · Budget assembled from weights + KV, blown by transient activations.** ⚠️ *fired twice —
+`CONTEXT.md` D12, then `B-05`* — the 256M fixture peaks at 2.7 GiB on a k=5 prompt, of which ~2.0 GiB is
 vision-tower activation for 65 sub-images processed in one pass. *Symptom:* the accounting table
 sums under budget and the pipeline OOMs anyway; worse, it OOMs *only* on high-`k` or high-page-count
 requests, so it looks like a data-dependent bug rather than a design one. *Prevention:* the budget
 is defined on `max_memory_allocated` (a peak), not on a sum of resident components, and
 `MemoryBudget` wraps the whole prefill rather than just model construction.
+
+Predicting it did not prevent it. `B-05`'s OOM *is* this failure mode, written down in advance and
+walked into anyway, because the prediction shaped the accounting and not the code that allocated.
+It did shorten the diagnosis: once the zeros were noticed, the cause was the first thing checked.
+Phase 6 finally measured the term rather than reasoning about it — `results/quant_ablation.jsonl`
+records `peak_allocated_bytes` per arm, and subtracting the two exactly-known components leaves
+0.69 GiB of transient, near-constant across every weight precision.
 
 ### Benchmarking — these destroy credibility, not just numbers
 
@@ -650,9 +768,13 @@ is worse than no benchmark.**
 
 ### Scheduler & serving
 
-**P-17 · GPU work executed on the asyncio event loop.** Every request's p99 explodes; it looks
-like a model problem and is a threading problem. *Prevention:* scheduler owns the GPU on a
-dedicated thread; asyncio touches it only through queues.
+**P-17 · GPU work executed on the asyncio event loop.** ✅ *never fired — built around the
+prediction, Phase 7.* Every request's p99 explodes; it looks like a model problem and is a
+threading problem. *Prevention:* `edgerag/serve/engine.py` owns the GPU on one dedicated thread;
+submissions cross in on a `queue.Queue` and tokens cross back via `loop.call_soon_threadsafe`,
+because `asyncio.Queue` is not thread-safe. Two tests record which thread the executor actually
+ran on — once directly, once through the full HTTP path — because a concurrency claim nothing
+checks is a hope.
 
 **P-18 · Head-of-line blocking from a long prefill.** One 4000-token retrieved context stalls all
 in-flight decodes. p99 TTFT looks catastrophic and inexplicable. *Fix:* chunked prefill (Phase 5).
@@ -663,10 +785,14 @@ admitted; a long one never finishes. Needs aging or a fairness term in admission
 
 ### Quantization
 
-**P-20 · Group-wise scales computed along the wrong axis.** Catastrophic quality loss that reads as
-"INT4 just doesn't work on VLMs" — a wrong and embarrassing conclusion to put in a README.
-*Prevention:* unit-test quantize→dequantize round-trip error per layer *before* running any
-end-to-end quality eval.
+**P-20 · Group-wise scales computed along the wrong axis.** ✅ *never fired — the test caught it in
+milliseconds.* Catastrophic quality loss that reads as "INT4 just doesn't work on VLMs" — a wrong
+and embarrassing conclusion to put in a README. *Prevention:* a round-trip test asserting on error
+**magnitude**, per layer, before any end-to-end eval. Writing it corrected the diagnostic it
+depended on: a deliberately flipped axis moved the tensor-wide mean by only 19%, because that mean
+is dominated by large-magnitude weights while a wrong axis destroys the *small* ones. The metric
+now also reports `max_row_relative_error`, which sees it immediately. An aggregate nearly blind to
+the failure it exists to catch is worse than no metric.
 
 **P-21 · Quantizing layers that must stay fp16** (embeddings, LayerNorm/RMSNorm, lm_head, the
 vision tower's patch embedding). Instant cliff. Skip-list them explicitly and *state the list* —
