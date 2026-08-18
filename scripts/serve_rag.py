@@ -38,10 +38,20 @@ from edgerag.core.quant import QuantConfig
 from edgerag.retrieval.corpus import load_corpus
 from edgerag.retrieval.index import FlatIndex
 from edgerag.sched.scheduler import Scheduler, SchedulerConfig
-from edgerag.serve.app import ServerState, create_app
-from edgerag.serve.engine import InferenceEngine
-from edgerag.serve.executor import ModelExecutor
-from edgerag.serve.pipeline import RagPipeline
+
+try:
+    from edgerag.serve.app import ServerState, create_app
+    from edgerag.serve.engine import InferenceEngine
+    from edgerag.serve.executor import ModelExecutor
+    from edgerag.serve.pipeline import RagPipeline
+except ImportError as exc:  # pragma: no cover -- depends on how the env was installed
+    # FastAPI is an optional extra, and a bare "No module named 'fastapi'" sends people looking
+    # for a bug in their code rather than at their install command. Say what to run.
+    raise ImportError(
+        f"serving needs the optional extras and {exc.name!r} is missing. Install with:\n"
+        '    pip install -e ".[serve]"'
+    ) from exc
+
 from scripts.colab_quant_ablation import MIXED_ARMS, arm_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

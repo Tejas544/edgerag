@@ -45,8 +45,12 @@ a disconnect costs one measurement rather than the session.
 ```python
 !git clone https://github.com/Tejas544/edgerag.git /content/edgerag
 %cd /content/edgerag
-!pip install -q -e . 2>&1 | tail -3
+!pip install -q -e ".[serve]" 2>&1 | tail -3
 ```
+
+**`[serve]` matters**, and only for step 9: `fastapi`, `uvicorn` and `sse-starlette` are optional
+extras, not base dependencies, so a plain `pip install -e .` gets you through every measurement
+cell and then fails at the server with `No module named 'fastapi'`.
 
 If `/content/edgerag` already exists, `git clone` silently does nothing — run
 `!cd /content/edgerag && git pull --ff-only` instead, or the session stays pinned to an old commit
@@ -154,27 +158,44 @@ Phase 7's gate end to end: retrieval, the quantized model, the paged cache, and 
 Starts in the background because the notebook needs its cell back.
 
 ```python
-import subprocess, time, urllib.request, json
+import importlib.util, json, pathlib, subprocess, time, urllib.request
 
-log = open('/content/server.log', 'w')
-server = subprocess.Popen(
-    ['python', '-m', 'scripts.serve_rag', '--port', '8000'],
-    stdout=log, stderr=subprocess.STDOUT, cwd='/content/edgerag',
-)
+REPO = '/content/edgerag'
 
-# The weights are already cached by step 8, so this is load time, not download time.
-for attempt in range(60):
-    time.sleep(5)
-    try:
-        health = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))
-        print(f'ready after {(attempt + 1) * 5}s:', health)
-        break
-    except Exception:
-        if server.poll() is not None:
-            print(open('/content/server.log').read()[-3000:])
-            raise SystemExit('server died during startup -- log above')
+# Preflight. Both of these otherwise surface as a confusing death five seconds later, with the
+# real cause buried in a log the traceback does not point at.
+problems = []
+if not pathlib.Path(REPO, 'scripts/serve_rag.py').exists():
+    problems.append('scripts/serve_rag.py is missing -- this clone predates it. Run:'
+                    '\n    !cd /content/edgerag && git pull --ff-only')
+if importlib.util.find_spec('fastapi') is None:
+    problems.append('the serving extras are not installed. Run:'
+                    '\n    !pip install -q -e "/content/edgerag[serve]"')
+
+if problems:
+    print('cannot start:\n\n' + '\n\n'.join(problems))
 else:
-    raise SystemExit('server did not come up in 5 minutes')
+    log = open('/content/server.log', 'w')
+    server = subprocess.Popen(
+        ['python', '-m', 'scripts.serve_rag', '--port', '8000'],
+        stdout=log, stderr=subprocess.STDOUT, cwd=REPO,
+    )
+    # The weights are already cached by step 8, so this is load time, not download time.
+    for attempt in range(60):
+        time.sleep(5)
+        if server.poll() is not None:          # checked BEFORE connecting: a dead process is
+            print(open('/content/server.log').read()[-3000:])   # the answer, not a refused port
+            print('\n^ server exited during startup -- the cause is above')
+            break
+        try:
+            health = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))
+            print(f'ready after {(attempt + 1) * 5}s:', health)
+            break
+        except Exception:
+            continue
+    else:
+        print('did not come up within 5 minutes. Tail of the log:')
+        print(open('/content/server.log').read()[-2000:])
 ```
 
 Defaults to **`LM8+ViT4`**, the configuration D24 measured: 2.296 GiB against fp16's 4.185, at a
