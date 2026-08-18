@@ -82,6 +82,15 @@ class Batch:
     def size(self) -> int:
         return len(self.prefill) + len(self.decode)
 
+    @property
+    def requests(self) -> list[Request]:
+        """Everything in this batch, when the caller does not care which phase it is in.
+
+        The engine needs this on the error path: if a forward pass raises, every request that was
+        in flight has to be failed, prefilling and decoding alike.
+        """
+        return [*self.prefill, *self.decode]
+
 
 class Scheduler:
     """Iteration-level scheduler over a shared block pool."""
