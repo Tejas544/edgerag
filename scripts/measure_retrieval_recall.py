@@ -144,6 +144,35 @@ def main(argv: list[str] | None = None) -> int:
     ) else "the image-space signal does not beat text-only alone"
     print(f"\n{verdict} at alpha={args.alpha} on this corpus.")
 
+    # Why, not just whether: a hybrid score that never beats text-only could mean the image side
+    # is a genuine zero, or it could mean alpha is too small to let a real signal through. The
+    # spread of each side's similarity scores across documents answers that without ambiguity --
+    # a signal with real ranking power varies a lot document-to-document; noise clusters near
+    # zero regardless of how it is weighted (CONTEXT.md D22).
+    text_matrix = np.stack([index.vectorizer.transform(q.question) for q in queries])
+    text_sim = text_matrix @ index.text_vectors.T  # (n_queries, n_docs)
+    image_ids = [q.query_id for q in queries if q.query_id in query_vectors]
+    diagnostics = {
+        "text_sim_mean_std": float(text_sim.std(axis=1).mean()),
+        "text_sim_mean_max": float(text_sim.max(axis=1).mean()),
+    }
+    if image_ids and index.image_vectors.shape[1]:
+        image_matrix = np.stack([query_vectors[qid] for qid in image_ids])
+        image_sim = image_matrix @ index.image_vectors.T
+        diagnostics["image_sim_mean_std"] = float(image_sim.std(axis=1).mean())
+        diagnostics["image_sim_mean_max"] = float(image_sim.max(axis=1).mean())
+        ratio = diagnostics["image_sim_mean_std"] / diagnostics["text_sim_mean_std"]
+        print(f"  score spread: text std={diagnostics['text_sim_mean_std']:.4f}  "
+              f"image std={diagnostics['image_sim_mean_std']:.4f}  "
+              f"({ratio:.2f}x) -- image_sim mean max={diagnostics['image_sim_mean_max']:+.4f}")
+
+    docs_by_key = {d.doc_key: d for d in docs}
+    with_text = sum(1 for q in queries if docs_by_key[q.gold_doc_key].text)
+    text_ceiling = with_text / max(len(queries), 1)
+    diagnostics["text_reachable_ceiling"] = text_ceiling
+    print(f"  structural ceiling for text-only: {text_ceiling:.1%} of queries have a gold doc "
+          "with OCR text at all")
+
     out = REPO_ROOT / "results" / "retrieval_recall.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
@@ -156,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
                 "n_queries": len(queries),
                 "vocab_size": index.vectorizer.vocab_size,
                 "recall": {str(k): v for k, v in results.items()},
+                "diagnostics": diagnostics,
             },
             indent=2,
         ),

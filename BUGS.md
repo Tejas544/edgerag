@@ -337,6 +337,46 @@ model fixture will copy the block above it.
 
 ---
 
+### B-08 · An hour of embedding, one bad line later, gone · 2026-08-18 · Phase 7
+
+**Symptom:** `scripts/measure_retrieval_recall.py`'s first real run embedded all 362 corpus
+documents (56 minutes on a GTX 1650) without incident, then crashed one loop later --
+`AttributeError: 'SmolVLMForConditionalGeneration' object has no attribute 'embed_tokens'` --
+inside the query-embedding step. Nothing had been written to disk. The 56 minutes had to be
+redone from nothing.
+
+**Root cause:** `embed_query_for_image_space` needs `embed_tokens` on *our* decoder (built by
+`load_from_hf`), because that is the layer being reused to project query text into the same space
+`embed_image` puts document vectors in. `main()` had only ever built the raw HF model and passed
+that through to both embedding calls. `embed_image` is correct to take the raw HF module -- it
+drives `encode_images_chunked`, which expects HF's own tree -- but the query-side call needed a
+different object, and the two calls were given the same one.
+
+**Diagnosis:** the traceback named the exact line and the exact wrong type; no investigation
+needed beyond reading it. The interesting part is what a dry run had already NOT caught: an
+earlier smoke test of this script's glue logic had stubbed `embed_query_for_image_space` at the
+module level to validate everything else (corpus loading, path resolution, JSON output) in
+seconds instead of an hour. The stub's signature accepted whatever `main()` passed without caring
+what type it was -- which is exactly the boundary the real bug lived on. Stubbing a function to
+speed up a dry run can silently erase a real call-site error at the one place it would have shown
+up. The lesson generalises past this one script: a stub that never inspects its arguments passes
+a bad argument as readily as a good one.
+
+**Fix:** build `decoder = load_from_hf(lm.spec, lm.model)` once in `main()` and pass it to the
+query-embedding call; `embed_image` keeps the raw HF module. Confirmed by re-running the dry-run
+smoke test a second way -- stubbing only the expensive `embed_image` call and letting the real
+`embed_query_for_image_space` run against a real decoder, which is the one path the first stub
+had accidentally protected from ever being exercised.
+
+**Prevention:** document embeddings are now cached to `results/embedding_cache/<model>.jsonl`,
+appended and `flush()`ed after every document, so a failure anywhere after the embedding loop
+never re-pays the vision-tower cost. Verified load-bearing, not decorative: patched `embed_image`
+to raise on any call and reran against a full cache -- zero calls, correct output.
+
+**Cost:** 56 minutes lost, ~20 minutes to fix and re-verify.
+
+---
+
 ### B-06 · A quantization test that failed one run in four, at exactly its own threshold · 2026-08-17 · Phase 6
 
 **Symptom:** `test_quant_linear_matches_fp16_within_quantization_error` failed with "quantized

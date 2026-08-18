@@ -1,0 +1,27 @@
+{
+  "model": "HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
+  "alpha": 0.5,
+  "n_docs": 362,
+  "n_docs_with_text": 250,
+  "n_queries": 165,
+  "vocab_size": 3780,
+  "recall": {
+    "1": {
+      "hybrid": 0.04242424242424243,
+      "text_only": 0.04242424242424243,
+      "image_only": 0.0
+    },
+    "5": {
+      "hybrid": 0.2,
+      "text_only": 0.2,
+      "image_only": 0.024242424242424242
+    }
+  },
+  "diagnostics": {
+    "text_sim_mean_std": 0.045265693217515945,
+    "text_sim_mean_max": 0.2200334519147873,
+    "image_sim_mean_std": 0.0064958082512021065,
+    "image_sim_mean_max": 0.008783379569649696,
+    "text_reachable_ceiling": 0.37575757575757573
+  }
+}

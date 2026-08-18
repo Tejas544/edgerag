@@ -16,13 +16,15 @@ is not enough to fit a combiner without overfitting the eval split, and a linear
 enough to reason about directly (D8: retrieval quality is tuned *late*, against a measurement, not
 designed in from a paper).
 
-**The image side is not a validated signal, and this module does not pretend otherwise.** See
-``edgerag/retrieval/embed.py`` for why: the query's "image-space" vector comes from
-``embed_tokens``, a layer trained for next-token prediction, not retrieval, projected into the
-same space the connector emits for images. Whether that carries any real relevance signal is an
-empirical question, so :func:`recall_at_k` always runs alongside :meth:`FlatIndex.search_text_only`
-and :meth:`FlatIndex.search_image_only` -- the same "compare against a naive baseline" discipline
-every other ablation in this project uses (FastV's ``attention`` vs ``uniform``, D20).
+**The image side is not a validated signal, and on the 256M fixture it measured out to none at
+all** (``CONTEXT.md`` D22). See ``edgerag/retrieval/embed.py`` for why: the query's "image-space"
+vector comes from ``embed_tokens``, a layer trained for next-token prediction, not retrieval,
+projected into the same space the connector emits for images. That was always an empirical
+question rather than an assumption, which is why :func:`recall_at_k` runs the hybrid score
+alongside :meth:`FlatIndex.search_text_only` and :meth:`FlatIndex.search_image_only` rather than
+trusting the headline number alone -- the same "compare against a naive baseline" discipline every
+other ablation in this project uses (FastV's ``attention`` vs ``uniform``, D20). The measurement
+is fixture-tier only (D4); the headline model's larger tower is unchecked.
 """
 
 from __future__ import annotations
@@ -35,11 +37,18 @@ import numpy as np
 from edgerag.retrieval.corpus import CorpusDoc
 from edgerag.retrieval.embed import TfidfVectorizer
 
-#: D8's default, unchallenged until the recall harness argues otherwise: weight image and text
-#: evenly. 112 of 362 documents have no OCR text at all, so alpha=1.0 (text-only) would blind the
-#: index to a third of the corpus, and alpha=0.0 (image-only) throws away exact keyword matches
-#: InfographicVQA questions frequently quote verbatim.
-DEFAULT_ALPHA = 0.5
+#: D8's harness argued, so this is no longer a guess: ``scripts/measure_retrieval_recall.py`` on
+#: the fixture corpus found ``hybrid == text_only`` bit-for-bit at both k=1 and k=5 across all 165
+#: held-out queries (``CONTEXT.md`` D22). The image-space query vector's similarity spread across
+#: documents is ~14x smaller than the text side's, and its *mean maximum* per query is slightly
+#: negative -- not a weak signal, closer to noise centered near zero. No alpha short of ~0.88
+#: would let it move a ranking, and by then it is actively displacing a text signal that is
+#: measurably real (recall@5 20% against a 37.6% structural ceiling -- 112/362 documents have no
+#: OCR text and are unreachable by text at all). Default is pure text until a joint embedding
+#: model gives the image side something to contribute; the ``alpha`` knob and both single-signal
+#: search methods stay, because this was measured on the 256M fixture (D4) and the 2.2B headline
+#: model's larger tower has not been checked.
+DEFAULT_ALPHA = 0.0
 
 
 class RetrievalIndex(Protocol):

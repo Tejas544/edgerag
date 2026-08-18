@@ -1013,6 +1013,80 @@ the ledger prices is byte-identical to the model that gets built (`test_quant_wi
 
 ---
 
+## D22 · Hybrid retrieval: the image side measured out to noise · **MEASURED** · 2026-08-18
+
+Phase 7. PLAN.md's sketch -- "image embeddings ... text embeddings ... hybrid scoring" -- never
+resolved how a *text-only query* is supposed to be compared against an *image* vector at all,
+because there is no query image in this workload; DocVQA-style retrieval is a text question
+against a corpus of pages. Building the naive answer (score a query against a document's own
+image) would have been circular for a self-retrieval test and untested for a real one.
+
+**Decision:** project the query's text into the space the connector emits image vectors in, via
+the decoder's own `embed_tokens` -- both are `hidden_size`-dimensional because both feed the same
+residual stream during generation, so there is *some* motivated reason to relate them, even though
+neither was trained with a contrastive retrieval objective the way CLIP's towers are. Whether that
+weak relationship is worth anything was treated as the open question it is, not assumed, and
+`recall_at_k` was built to answer it directly: hybrid score, alongside text-only and image-only
+controls, every run.
+
+**Text scoring is sparse TF-IDF over the corpus's own OCR field**, not a second dense encoder --
+zero new dependency, zero new resident model, and it degrades honestly rather than erroring: 112
+of 362 corpus documents ship no OCR text at all (DocVQA scans, no Textract sidecar), and their
+TF-IDF vector is correctly the zero vector.
+
+### Measured: `scripts/measure_retrieval_recall.py`, 256M fixture (D4), full 362-doc corpus, all
+165 held-out queries, alpha=0.5
+
+| k | hybrid | text_only | image_only |
+|---:|---:|---:|---:|
+| 1 | 0.042 | 0.042 | 0.000 |
+| 5 | 0.200 | 0.200 | 0.024 |
+
+**Finding 1 -- `hybrid` equals `text_only` bit-for-bit at both k, across all 165 queries, and the
+reason is not close to ambiguous.** The similarity spread each side contributes to the blended
+score, averaged over every query:
+
+```
+text  std=0.0453  max=0.2034
+image std=0.0065  max=0.0088   (0.14x the text spread)
+```
+
+`image_sim`'s mean-*maximum* per query -- the best-matching document, the number a ranking
+actually depends on -- sits at +0.0088, indistinguishable from zero. This is not an underweighted
+signal; it is noise centered near zero, and at alpha=0.5 it never had a chance to move a single
+ranking. The crossover point where it would start to matter is around alpha≈0.88 -- a weighting
+that discards the real text signal in exchange for one already shown to carry none. **No alpha in
+a sane range makes this hybrid.** `embed_tokens` was never trained for retrieval; the measurement
+confirms rather than merely suspects it.
+
+**Finding 2 -- text-only recall must be read against its own structural ceiling, not against
+100%.** Only 62 of the 165 held-out queries (37.6%) have a gold document with OCR text at all --
+the other 62.4% are structurally unreachable by a text-only signal no matter how good the matching
+is, the same shape of caution D20 applied to the pruning baseline (the 0.438 ANLS floor was never
+a retrieval ceiling either). Read against the 37.6% that are reachable, recall@5 = 20% is roughly
+53% of what is achievable, not "disappointingly low" against a naive full-corpus expectation.
+
+**Consequence -- the code changed to match the measurement, not the other way round.**
+`DEFAULT_ALPHA` moved from the design-time guess (0.5) to what was measured (0.0, pure text).
+`FlatIndex.search_image_only`, `embed_query_for_image_space`, and the `alpha` knob all stay: this
+was measured on the 256M fixture only, and the 2.2B headline model's larger, more capable vision
+tower has not been checked. If it changes the picture, the fix is a two-word CLI flag
+(`--alpha 0.5`), which is the entire point of having built the knob before knowing the answer
+rather than after.
+
+**What running this cost, and what it taught about running it again:** embedding 362 documents
+took 56 minutes on a GTX 1650 (~9s/image; `embed_image` was never built for throughput, nothing
+upstream of it needs to be). The first attempt burned that hour and then crashed one loop later on
+an unrelated bug -- `embed_query_for_image_space` needs *our* decoder for its `embed_tokens` call,
+and `main()` was passing the raw HF module through, which has no such top-level attribute. Nothing
+had been persisted, so the full 56 minutes had to be redone. `BUGS.md` B-05's lesson again: a
+long-running measurement with no checkpoint turns any late failure into a full re-run. Document
+embeddings are now cached to `results/embedding_cache/<model>.jsonl`, appended and flushed one
+line per document -- verified load-bearing by patching `embed_image` to raise on any call and
+confirming a full cache hit re-ran in seconds.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
