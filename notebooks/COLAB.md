@@ -148,7 +148,65 @@ Smoke test first if quota is tight — one arm, two queries, about four minutes:
 Resumable per arm: a completed arm is appended to the file and skipped on the next invocation, so
 a disconnect costs one arm rather than the session.
 
-### 9 · Bring it home
+### 9 · Boot the server and ask it a question — ~3 min
+
+Phase 7's gate end to end: retrieval, the quantized model, the paged cache, and streaming HTTP.
+Starts in the background because the notebook needs its cell back.
+
+```python
+import subprocess, time, urllib.request, json
+
+log = open('/content/server.log', 'w')
+server = subprocess.Popen(
+    ['python', '-m', 'scripts.serve_rag', '--port', '8000'],
+    stdout=log, stderr=subprocess.STDOUT, cwd='/content/edgerag',
+)
+
+# The weights are already cached by step 8, so this is load time, not download time.
+for attempt in range(60):
+    time.sleep(5)
+    try:
+        health = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))
+        print(f'ready after {(attempt + 1) * 5}s:', health)
+        break
+    except Exception:
+        if server.poll() is not None:
+            print(open('/content/server.log').read()[-3000:])
+            raise SystemExit('server died during startup -- log above')
+else:
+    raise SystemExit('server did not come up in 5 minutes')
+```
+
+Defaults to **`LM8+ViT4`**, the configuration D24 measured: 2.296 GiB against fp16's 4.185, at a
+quality difference of 0.31 sigma. Pass `--arm fp16` to serve unquantized for comparison.
+
+Now ask it something. The corpus is DocVQA and InfographicVQA pages, so ask what a document says:
+
+```python
+!curl -s http://127.0.0.1:8000/v1/chat/completions   -H 'Content-Type: application/json'   -d '{"messages":[{"role":"user","content":"What percentage of users are female?"}],"max_tokens":32}'   | python -m json.tool
+```
+
+**Read `retrieved` before `content`.** It lists the page keys the answer was built from — an
+answer whose sources are wrong is a *retrieval* result, not a generation one, and the two get
+misdiagnosed as each other constantly.
+
+Streaming, which is the actual gate wording:
+
+```python
+!curl -N -s http://127.0.0.1:8000/v1/chat/completions   -H 'Content-Type: application/json'   -d '{"messages":[{"role":"user","content":"What is the total?"}],"max_tokens":32,"stream":true}'
+```
+
+Tokens should arrive one `data:` line at a time and finish with `data: [DONE]`. If they all appear
+at once, the stream is being buffered somewhere — the server sets `X-Accel-Buffering: no` for
+exactly that reason, but `curl` without `-N` will do it too.
+
+When you are done:
+
+```python
+server.terminate(); server.wait(); log.close()
+```
+
+### 10 · Bring it home
 
 ```python
 %cd /content/edgerag

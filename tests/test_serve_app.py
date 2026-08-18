@@ -374,3 +374,50 @@ def test_streaming_reports_its_sources_in_the_opening_chunk() -> None:
         assert events[0]["choices"][0]["delta"]["retrieved"] == ["infographic:9:0"]
     finally:
         engine.stop()
+
+
+@pytest.mark.slow
+def test_the_whole_server_answers_a_document_question_on_the_fixture(tmp_path) -> None:
+    """Everything at once: retrieval, a quantized model, the paged cache, and HTTP.
+
+    ``scripts/serve_rag.py`` is the assembly point, and an assembly point that is never assembled
+    is exactly the shape of BUGS.md B-05. This boots it for real on the 256M fixture -- INT8
+    language beside INT4 vision, the same mixed configuration D24 measured -- puts a question in,
+    and requires a non-empty answer with the pages it came from.
+    """
+    pytest.importorskip("transformers")
+    import torch
+
+    from edgerag.core.loader import FIXTURE_MODEL
+    from edgerag.retrieval.corpus import CORPUS_PATH
+    from scripts.serve_rag import build_server
+
+    if not CORPUS_PATH.exists():
+        pytest.skip("corpus not built; run scripts.build_corpus")
+
+    app, engine = build_server(
+        model_id=FIXTURE_MODEL, arm="LM8+ViT4", group_size=64, num_blocks=512,
+        chunk_size=256, k=2, device="cpu", dtype=torch.float32,
+    )
+    try:
+        client = TestClient(app)
+        assert client.get("/health").json()["status"] == "ok"
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "What is the total revenue?"}],
+                  "max_tokens": 8},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+        assert body["retrieved"], "no pages were retrieved"
+        assert len(body["retrieved"]) == 2, "k=2 was requested"
+        assert body["choices"][0]["message"]["content"].strip(), "the model answered nothing"
+        # The prompt is the retrieved pages, not the bare question -- if retrieval or the vision
+        # merge silently dropped out, this collapses to a handful of tokens.
+        assert body["usage"]["prompt_tokens"] > 500, (
+            f"prompt was only {body['usage']['prompt_tokens']} tokens -- retrieved pages missing"
+        )
+    finally:
+        engine.stop()

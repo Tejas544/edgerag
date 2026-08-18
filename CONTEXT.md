@@ -1225,10 +1225,28 @@ logits tensor was the high-water mark by only 271 MiB, so deleting it revealed t
 moment. The allocation is still gone — which is what matters for fragmentation and concurrent
 headroom — but predicting a peak reduction needs the whole timeline, not one tensor's size.
 
-**Open, and cheap to close:** the `LM8+ViT4` throughput (5.58 tok/s) sits in session 3 while
-`LM@int8` (5.19) sits in session 1, so the comparison between the two INT8-language arms carries
-the 15% band. A single-session re-run of all eight arms would produce a publishable latency
-column; nothing else in this table needs re-measuring.
+**Finding 5 — the `peak` column mixes two code versions, and the raw file is what showed it.**
+Decomposing every row as `peak − weights − preallocated pool` splits the table cleanly in two:
+
+| arms | residual | code |
+|---|---:|---|
+| the six measured in sessions 1–2 | 0.95–0.98 GiB | before B-09 |
+| `fp16`, `LM8+ViT4` (session 3) | 0.686–0.694 GiB | after B-09 |
+
+So **`LM8+ViT4`'s peak is 272 MiB lower partly because of the logits fix, not only because it is
+smaller.** Reading 5.541 → 4.857 GiB as "the mixed arm saves 0.68 GiB of peak over LM@int8"
+credits the arm with a change that came from the code. The weight column is unaffected — those
+are exact and ledger-confirmed — and so is quality; it is specifically `peak_allocated_bytes` that
+is not comparable across the two groups.
+
+This is `00_FOUNDATIONS.md` §4 rule 5 catching the harness rather than the model: the run held the
+workload, the device and the settings constant and did not hold *the code* constant. Records now
+stamp `code_version` (the git SHA they were measured at), so the next table that mixes versions
+says so instead of having to be reverse-engineered from residuals.
+
+**Open, and cheap to close:** one single-session re-run of all eight arms, on today's code, would
+fix both the 15% latency band and the split peak column at once. Nothing else here needs
+re-measuring — weights are exact and confirmed, and quality is stable.
 
 ---
 

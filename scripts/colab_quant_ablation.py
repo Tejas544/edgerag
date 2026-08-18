@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,24 @@ def arm_label(arm: str, bits: int) -> str:
     if arm in MIXED_ARMS:
         return arm
     return "fp16" if bits == 16 else f"{arm}@int{bits}"
+
+
+def code_version() -> str:
+    """The git SHA these numbers were measured at.
+
+    D24 finding 5 is why this exists: six arms were measured before the B-09 logits fix and two
+    after, and the ``peak`` column silently mixed them -- recoverable only by decomposing every
+    row's residual by hand. A record that stamps its device, its workload and its settings but not
+    its *code* can still be two incomparable experiments wearing one table.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=5, check=False,
+        )
+        return result.stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
 
 
 def _vision_parts(hf_model: torch.nn.Module) -> tuple[torch.nn.Module, torch.nn.Module]:
@@ -406,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_new_tokens": args.max_new_tokens,
             "trials": args.trials,
             "workload_fingerprint": fingerprint,
+            "code_version": code_version(),
             "device": info.name,
             "trusted": info.trusted,
             **measured,
