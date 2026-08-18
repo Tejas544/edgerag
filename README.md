@@ -264,10 +264,13 @@ and the predicted failure modes this design is built to avoid.
   against fp16's 13.9. `QuantLinear` dequantizes then calls a normal matmul, and a T4 has no INT4
   tensor cores, so the packed bytes are expanded before they reach the multiplier. The memory win
   is real; the speed win needs the dequantize fused into the GEMV, which is not written.
-- **The throughput column spans three Colab sessions and carries ~15% of variance.** Two sessions
-  agree to 1.4% while a third sits 15% low — visible in the `ViT` arms, which cannot affect decode
-  speed at all and still differ. A single-session re-run of all eight arms would fix it; the ~4×
-  INT4 regression survives the noise, the second decimal place does not.
+- **Two of eight latency arms are still cross-session.** A single-session re-run resolved the
+  headline question — the `ViT@int4` control lands at **0.976× fp16**, confirming vision precision
+  does not touch decode, and grouping by *language* precision explains everything: fp16 1.00×,
+  INT8 0.42×, INT4 0.27×, with arms differing only in vision agreeing to 2.4%. `ViT@int8` and
+  `LM8+ViT4` were not reached before the runtime was reclaimed, so their ratios still divide across
+  sessions. Measured variance: **~2% within a session, ~7.5% across** (fp16 at 13.24, 13.94, 14.31),
+  which is why a cross-session comparison cannot resolve anything under ~10%.
 - **The `peak` column mixes two code versions.** Six arms were measured before the prefill-logits
   fix and two after, a 272 MiB difference in the transient term. Weights and quality are
   unaffected. Records now stamp `code_version` so this cannot recur silently.
