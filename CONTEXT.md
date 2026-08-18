@@ -1215,7 +1215,24 @@ not an effect: the three sessions separate cleanly.
 | 3 | fp16, LM8+ViT4 | agrees with session 2 to **1.4%** |
 
 Two sessions agreeing to 1.4% while a third sits 15% low is D14 finding 5b with a cleaner control
-than D14 had. **The consequence for reading the table: every `vs fp16` ratio for a session-1 arm
+than D14 had.
+
+> ⚠️ **Amended 2026-08-19 — the "session 1 ran 15% slow" reading does not survive first contact
+> with a re-measurement.** A single-session sweep (`results/quant_latency_partial.jsonl`, session
+> `27d1444051bb`) got through three of eight arms before disconnecting, and the two session-1 arms
+> in it moved in *opposite* directions rather than both rising ~15%: `LM@int4` 3.79 → 3.66
+> (×0.96), `LM+ViT@int4` 3.31 → 3.53 (×1.07), against fp16's ×1.03. Trials are tight enough for
+> that to mean something — 1.4% CV over 5 trials — so a uniform 15% session multiplier would have
+> been unmistakable and is not there.
+>
+> Which leaves `ViT@int4`'s 0.85x needing a different explanation, and the honest position is that
+> there isn't one yet. Two candidates: session variance is not a single multiplier because the
+> arms have different bottlenecks (fp16-GEMM-bound for the ViT arms, dequantize-bound for the INT4
+> ones, which respond differently to clock and thermal state), or the anomaly is not session
+> variance at all. **`ViT@int4` is precisely the arm the interrupted sweep did not reach**, so this
+> resolves on completion and not before. Finding 3's *conclusion* — that cross-session tok/s
+> comparisons are untrustworthy — is unaffected and if anything strengthened; what is withdrawn is
+> the tidy "session 1 was uniformly slow" mechanism offered for it. **The consequence for reading the table: every `vs fp16` ratio for a session-1 arm
 is understated by roughly 15%.** INT8-language is ~0.37–0.43× and INT4-language ~0.24–0.31×; the
 ~4× INT4 regression D7 predicted survives easily, the second decimal place does not.
 
