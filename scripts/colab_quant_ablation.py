@@ -207,6 +207,11 @@ def measure_arm(
         "decode_tokens_per_s": Percentiles.of(tok_s).to_dict() if tok_s else None,
         "anls": sum(scores) / len(scores) if scores else 0.0,
         "n_scored": len(scores),
+        # The count this *specific* measurement was run against. Recorded per row because arms
+        # measured in different sessions can carry different --n-queries -- resuming skips an
+        # arm outright, it does not check that the settings match, so a blanket CLI value at
+        # print time would silently misdescribe every row measured somewhere else.
+        "n_requested": len(requests),
         "n_oom": oom,
     }
 
@@ -355,7 +360,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def summarise(out_path: Path, n_queries: int) -> int:
-    """Print the gate's table, and refuse to call an empty run a result."""
+    """Print the gate's table, and refuse to call an empty run a result.
+
+    ``n_queries`` describes only *this invocation* -- resuming skips an arm outright rather than
+    re-measuring it, so a row already on disk may have been scored under a different session's
+    ``--n-queries``. Reading ``n_queries`` here instead of each row's own ``n_scored`` is exactly
+    how a leftover smoke-test row would get printed with a full run's sample-size caveat, or the
+    reverse. The per-row ``n`` column is the only number that is ever true of the row it sits on.
+    """
     rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line]
     if not rows:
         print("FAILED: nothing was measured. Do not use this file.", file=sys.stderr)
@@ -363,7 +375,7 @@ def summarise(out_path: Path, n_queries: int) -> int:
 
     baseline = next((r for r in rows if r["bits"] == 16), None)
     print(f"{'arm':>8}{'bits':>6}{'weights':>10}{'peak':>8}{'tok/s':>9}{'vs fp16':>9}"
-          f"{'TTFT':>8}{'ANLS':>8}")
+          f"{'TTFT':>8}{'ANLS':>8}{'n':>5}")
     for row in sorted(rows, key=lambda r: (-r["bits"], r["arm"])):
         decode = row["decode_tokens_per_s"]
         speed = decode["p50"] if decode else float("nan")
@@ -373,18 +385,23 @@ def summarise(out_path: Path, n_queries: int) -> int:
         )
         print(f"{row['arm']:>8}{row['bits']:>6}{row['weight_gib']:>9.3f}G"
               f"{row['peak_allocated_bytes'] / GIB:>7.2f}G{speed:>9.2f}{relative:>9}"
-              f"{row['ttft_s']['p50']:>7.2f}s{row['anls']:>8.4f}")
+              f"{row['ttft_s']['p50']:>7.2f}s{row['anls']:>8.4f}{row['n_scored']:>5}")
 
-    print(f"\n  ANLS is over n={n_queries}; the standard error at that size is ~0.06 "
-          "(CONTEXT.md D20),")
-    print("  so gaps under ~0.12 in this column are ties. Quote the sample size with the number.")
+    # sqrt-scaled off CONTEXT.md D20's n=40 measurement, not re-derived from theory: ANLS is not a
+    # clean binomial proportion, so this is a rough guide for reading the table, not a real CI.
+    print("\n  SE per row ~= 0.06 * sqrt(40 / n) (calibrated at n=40, CONTEXT.md D20) -- read the")
+    print("  n column per row, not one blanket figure: arms resumed from an earlier session may")
+    print("  carry a different sample size than this invocation's --n-queries.")
     print("  `peak` is measured, so CONTEXT.md D21's inferred activation line can now be replaced")
     print("  with arithmetic on these numbers rather than on a median request length.")
 
-    thin = [r for r in rows if r["n_scored"] < n_queries * 0.5]
+    # `n_requested` is per-row and present on anything measured after this field was added; older
+    # rows fall back to this invocation's --n-queries, the best available guess for them.
+    thin = [r for r in rows if r["n_scored"] < r.get("n_requested", n_queries) * 0.5]
     for row in thin:
+        expected = row.get("n_requested", n_queries)
         print(f"\nWARNING: {row['arm']} @ int{row['bits']} scored only {row['n_scored']}/"
-              f"{n_queries} requests -- that mean is over a biased subset.", file=sys.stderr)
+              f"{expected} requests -- that mean is over a biased subset.", file=sys.stderr)
     return 0
 
 
