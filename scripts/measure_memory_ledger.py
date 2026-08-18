@@ -529,6 +529,18 @@ def main(argv: list[str] | None = None) -> int:
             }
             for c in per_bits[args.ship_bits]
         },
+        # Per component, per bit width, in bytes. The matrix above prices whole *arms*, which can
+        # only express one bit width at a time; D23 finding 2 says the configuration worth
+        # shipping is mixed (INT8 language + INT4 vision), and pricing that needs the components
+        # priced independently. 16 is the dense cost.
+        "component_bytes": {
+            c.name: {
+                "16": c.dense_bytes,
+                **{str(bits): comp.quantized_bytes
+                   for bits in sorted(per_bits) for comp in per_bits[bits] if comp.name == c.name},
+            }
+            for c in per_bits[args.ship_bits]
+        },
         "matrix": matrix,
         "skips": skips,
         "ledger": ledger.to_dict(),

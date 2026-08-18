@@ -21,6 +21,9 @@ from torch import nn
 from scripts import measure_memory_ledger
 from scripts.colab_quant_ablation import (
     ARMS,
+    MIXED_ARMS,
+    arm_label,
+    arm_spec,
     build_arm,
     ledger_prediction,
     measure_arm,
@@ -53,18 +56,26 @@ def test_resident_bytes_counts_buffers_as_well_as_parameters() -> None:
     assert resident_bytes(Tiny()) == 10 * 10 * 2 + 10 * 5
 
 
-def test_ledger_lookup_finds_the_arm_and_maps_fp16_to_the_ledger_name() -> None:
-    """The ledger calls the unquantized row ``none``; this script calls it ``fp16``."""
-    predicted = ledger_prediction("fp16", 16)
+def test_ledger_prices_an_unquantized_spec_as_the_full_checkpoint() -> None:
+    predicted = ledger_prediction({})
     if predicted is None:
         pytest.skip("results/memory_ledger.json has not been generated")
     assert predicted > 4 * 1024**3, "the fp16 checkpoint is over 4 GiB -- that is the whole point"
-    assert ledger_prediction("LM+ViT", 4) < predicted
+    assert ledger_prediction(arm_spec("LM+ViT", 4)) < predicted
 
 
-def test_ledger_lookup_returns_none_for_an_arm_that_was_not_computed() -> None:
+def test_ledger_prices_a_mixed_spec_between_its_two_uniform_neighbours() -> None:
+    """The whole reason per-component pricing exists: no arm row to look this up under."""
+    mixed = ledger_prediction(MIXED_ARMS["LM8+ViT4"])
+    if mixed is None:
+        pytest.skip("results/memory_ledger.json has not been generated")
+    # INT8 language dominates, so it must sit above all-INT4 and below all-INT8.
+    assert ledger_prediction(arm_spec("LM+ViT", 4)) < mixed < ledger_prediction(arm_spec("LM", 8))
+
+
+def test_ledger_returns_none_for_a_bit_width_it_never_priced() -> None:
     """None means 'no prediction', and the runner prints that rather than inventing a delta."""
-    assert ledger_prediction("nonexistent-arm", 4) is None
+    assert ledger_prediction({"language": 3}) is None
 
 
 def test_summarise_refuses_to_call_an_empty_run_a_result(tmp_path) -> None:
@@ -146,7 +157,7 @@ def test_one_arm_runs_end_to_end_on_the_fixture(tmp_path) -> None:
     )
 
     lm, decoder = build_arm(
-        FIXTURE_MODEL, "LM+ViT", bits=4, group_size=64, device="cpu", dtype=torch.float32
+        FIXTURE_MODEL, arm_spec("LM+ViT", 4), group_size=64, device="cpu", dtype=torch.float32
     )
     try:
         # The tower must have been replaced in place, or the ViT half of every arm is a no-op that
@@ -189,7 +200,7 @@ def test_a_thinner_row_does_not_count_as_done(tmp_path) -> None:
         encoding="utf-8",
     )
     assert completed_arms(path, n_queries=40, trials=3) == set()
-    assert completed_arms(path, n_queries=2, trials=1) == {("fp16", 16)}
+    assert completed_arms(path, n_queries=2, trials=1) == {"fp16"}
 
 
 def test_a_row_measured_more_thoroughly_still_counts_as_done(tmp_path) -> None:
@@ -200,7 +211,7 @@ def test_a_row_measured_more_thoroughly_still_counts_as_done(tmp_path) -> None:
     path.write_text(
         json.dumps({"arm": "LM", "bits": 4, "n_requested": 60, "trials": 5}), encoding="utf-8"
     )
-    assert completed_arms(path, n_queries=40, trials=3) == {("LM", 4)}
+    assert completed_arms(path, n_queries=40, trials=3) == {"LM@int4"}
 
 
 def test_rows_predating_the_fields_are_treated_as_adequate(tmp_path) -> None:
@@ -209,7 +220,7 @@ def test_rows_predating_the_fields_are_treated_as_adequate(tmp_path) -> None:
 
     path = tmp_path / "quant_ablation.jsonl"
     path.write_text(json.dumps({"arm": "LM", "bits": 8}), encoding="utf-8")
-    assert completed_arms(path, n_queries=40, trials=3) == {("LM", 8)}
+    assert completed_arms(path, n_queries=40, trials=3) == {"LM@int8"}
 
 
 def test_summarise_prefers_the_latest_measurement_of_an_arm(tmp_path, capsys) -> None:
@@ -227,3 +238,61 @@ def test_summarise_prefers_the_latest_measurement_of_an_arm(tmp_path, capsys) ->
     out = capsys.readouterr().out
     assert "0.4378" in out and "0.8889" not in out, "the superseded row must not be the one shown"
     assert "superseded" in out
+
+
+# --- mixed precision (D23 finding 2) ------------------------------------------------------------
+
+
+def test_uniform_arms_normalise_to_one_bit_width_per_component() -> None:
+    assert arm_spec("LM", 4) == {"language": 4}
+    assert arm_spec("LM+ViT", 8) == {"language": 8, "vision": 8, "connector": 8}
+    assert arm_spec("fp16", 16) == {}
+
+
+def test_a_mixed_arm_carries_its_own_widths_and_ignores_the_bits_flag() -> None:
+    """--bits must not silently override a configuration that names its own widths."""
+    assert arm_spec("LM8+ViT4", 4) == {"language": 8, "vision": 4, "connector": 4}
+    assert arm_spec("LM8+ViT4", 8) == {"language": 8, "vision": 4, "connector": 4}
+
+
+def test_labels_distinguish_bit_widths_and_leave_mixed_arms_self_named() -> None:
+    assert arm_label("LM", 4) == "LM@int4"
+    assert arm_label("LM", 8) == "LM@int8"
+    assert arm_label("fp16", 16) == "fp16"
+    assert arm_label("LM8+ViT4", 0) == "LM8+ViT4"
+
+
+def test_old_rows_without_a_label_resume_under_the_derived_one(tmp_path) -> None:
+    """Rows measured before labels existed must still be recognised, or every arm re-runs."""
+    from scripts.colab_quant_ablation import completed_arms
+
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(
+        json.dumps({"arm": "LM", "bits": 4, "n_requested": 40, "trials": 3}), encoding="utf-8"
+    )
+    assert completed_arms(path, n_queries=40, trials=3) == {"LM@int4"}
+
+
+@pytest.mark.slow
+def test_the_mixed_arm_really_builds_two_precisions_at_once(tmp_path) -> None:
+    """INT8 language beside INT4 vision, in one model -- the configuration D23 says to ship.
+
+    Asserted on the built modules rather than on byte counts, because the failure this guards
+    against is one config silently winning over the other and quantizing everything to one width.
+    """
+    pytest.importorskip("transformers")
+    from edgerag.core.linear import QuantLinear
+    from edgerag.core.loader import FIXTURE_MODEL
+
+    lm, decoder = build_arm(
+        FIXTURE_MODEL, {"language": 8, "vision": 4, "connector": 4},
+        group_size=64, device="cpu", dtype=torch.float32,
+    )
+    try:
+        language = [m for m in decoder.modules() if isinstance(m, QuantLinear)]
+        vision = [m for m in lm.model.model.vision_model.modules() if isinstance(m, QuantLinear)]
+        assert language and vision, "both halves must actually be quantized"
+        assert {m.config.bits for m in language} == {8}, "language should be INT8"
+        assert {m.config.bits for m in vision} == {4}, "vision should be INT4"
+    finally:
+        del decoder, lm

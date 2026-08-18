@@ -67,7 +67,40 @@ ARMS: dict[str, tuple[str, ...]] = {
     "ViT": ("vision", "connector"),
 }
 
+#: Named configurations that apply **different bit widths to different components**, which the
+#: uniform ARMS grid above cannot express. D23 finding 2 is why this exists: the INT4 quality
+#: cliff is entirely in the language model (-44% ANLS) while the vision tower is nearly free to
+#: quantize (-2.4%, inside n=40 noise). So the configuration worth shipping is neither "all INT4"
+#: nor "all INT8" -- it is INT8 where the cliff is and INT4 where it is not. Predicted 2.296 GiB
+#: (1.82x fp16) at essentially fp16 quality, against LM+ViT@4's 1.55 GiB at 60% of quality.
+MIXED_ARMS: dict[str, dict[str, int]] = {
+    "LM8+ViT4": {"language": 8, "vision": 4, "connector": 4},
+}
+
 BLOCK_SIZE = 16
+
+
+def arm_spec(arm: str, bits: int) -> dict[str, int]:
+    """Component -> bit width for one row of the ablation.
+
+    Uniform arms are ``{component: bits}`` over whatever the arm touches; mixed arms carry their
+    own per-component widths. Normalising both into one shape here is what lets everything
+    downstream -- building, pricing, labelling -- stay ignorant of the distinction.
+    """
+    if arm in MIXED_ARMS:
+        return dict(MIXED_ARMS[arm])
+    return {component: bits for component in ARMS[arm]}
+
+
+def arm_label(arm: str, bits: int) -> str:
+    """The identity a row is resumed on. Mixed arms are self-naming; uniform ones need the width.
+
+    Keyed on the label rather than ``(arm, bits)`` because a mixed arm has no single ``bits`` to
+    key on, and inventing one would collide two different configurations under one name.
+    """
+    if arm in MIXED_ARMS:
+        return arm
+    return "fp16" if bits == 16 else f"{arm}@int{bits}"
 
 
 def _vision_parts(hf_model: torch.nn.Module) -> tuple[torch.nn.Module, torch.nn.Module]:
@@ -89,23 +122,33 @@ def resident_bytes(*modules: torch.nn.Module) -> int:
     return total
 
 
-def ledger_prediction(arm: str, bits: int) -> int | None:
-    """What ``results/memory_ledger.json`` says this arm should weigh, if it has been computed."""
+def ledger_prediction(spec: dict[str, int]) -> int | None:
+    """What ``results/memory_ledger.json`` says this configuration should weigh.
+
+    Summed per component rather than looked up per arm, because a mixed configuration has no arm
+    row to look up -- and summing components is the more honest check anyway: it prices exactly
+    what is about to be built, component by component, instead of matching a label.
+    """
     path = REPO_ROOT / "results" / "memory_ledger.json"
     if not path.exists():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    wanted = ("none", 16) if arm == "fp16" else (arm, bits)
-    for row in payload.get("matrix", []):
-        if (row["arm"], row["bits"]) == wanted:
-            return int(row["total_bytes"])
-    return None
+    component_bytes = payload.get("component_bytes")
+    if not component_bytes:
+        return None  # ledger predates per-component pricing; re-run measure_memory_ledger
+
+    total = 0
+    for component, per_bits in component_bytes.items():
+        wanted = str(spec.get(component, 16))  # unquantized components stay fp16
+        if wanted not in per_bits:
+            return None  # the ledger was not computed at this bit width
+        total += int(per_bits[wanted])
+    return total
 
 
 def build_arm(
     model_id: str,
-    arm: str,
-    bits: int,
+    spec: dict[str, int],
     group_size: int,
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
@@ -122,16 +165,18 @@ def build_arm(
     complete, well-formed file of zeros (B-05 again). The runs that matter are still T4-only, and
     ``main`` still refuses anything else.
     """
-    components = ARMS[arm]
-    config = QuantConfig(group_size=group_size, bits=bits) if components else None
+    language_bits = spec.get("language")
+    vision_bits = spec.get("vision")
+    language_config = (
+        QuantConfig(group_size=group_size, bits=language_bits) if language_bits else None
+    )
+    config = QuantConfig(group_size=group_size, bits=vision_bits) if vision_bits else None
 
     lm = load_model(model_id, device=device, dtype=dtype)
-    decoder = load_from_hf(
-        lm.spec, lm.model, quant_config=config if "language" in components else None
-    )
+    decoder = load_from_hf(lm.spec, lm.model, quant_config=language_config)
     free_duplicate_hf_decoder(lm.model)
 
-    if config is not None and "vision" in components:
+    if config is not None:
         vision, connector = _vision_parts(lm.model)
         plan = quantize_module_(vision, config)
         quantize_module_(connector, config)
@@ -216,7 +261,7 @@ def measure_arm(
     }
 
 
-def completed_arms(path: Path, n_queries: int, trials: int) -> set[tuple[str, int]]:
+def completed_arms(path: Path, n_queries: int, trials: int) -> set[str]:
     """Arms already measured **to at least the currently requested standard**.
 
     Resuming on identity alone -- "a row for this arm exists, skip it" -- is what let a
@@ -238,7 +283,7 @@ def completed_arms(path: Path, n_queries: int, trials: int) -> set[tuple[str, in
         enough_queries = row.get("n_requested", n_queries) >= n_queries
         enough_trials = row.get("trials", trials) >= trials
         if enough_queries and enough_trials:
-            done.add((row["arm"], row["bits"]))
+            done.add(row.get("label") or arm_label(row["arm"], row["bits"]))
     return done
 
 
@@ -246,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Phase 6 quantization ablation (T4)")
     parser.add_argument("--drive", default="")
     parser.add_argument("--model", default=HEADLINE_MODEL)
-    parser.add_argument("--arms", nargs="+", default=["fp16", "LM", "LM+ViT", "ViT"])
+    parser.add_argument(
+        "--arms", nargs="+", default=["fp16", "LM", "LM+ViT", "ViT", "LM8+ViT4"]
+    )
     parser.add_argument("--bits", type=int, nargs="+", default=[4, 8])
     parser.add_argument("--group-size", type=int, default=128)
     parser.add_argument("--n-queries", type=int, default=40)
@@ -303,20 +350,24 @@ def main(argv: list[str] | None = None) -> int:
     # nothing at 8 bits" are the same model, and running it twice would put two samples of the
     # same configuration in a table read as a comparison.
     plan: list[tuple[str, int]] = [("fp16", 16)] if "fp16" in args.arms else []
-    plan += [(arm, bits) for bits in args.bits for arm in args.arms if arm != "fp16"]
+    plan += [(arm, bits) for bits in args.bits for arm in args.arms
+             if arm != "fp16" and arm not in MIXED_ARMS]
+    # Mixed arms carry their own per-component widths, so they appear once, not once per --bits.
+    plan += [(arm, 0) for arm in args.arms if arm in MIXED_ARMS]
 
     for arm, bits in plan:
-        if (arm, bits) in done:
-            print(f"  {arm} @ int{bits}: already measured, skipping")
+        label = arm_label(arm, bits)
+        if label in done:
+            print(f"  {label}: already measured, skipping")
             continue
-        label = "fp16" if bits == 16 else f"{arm} @ int{bits}"
-        print(f"  {label}: loading")
+        spec = arm_spec(arm, bits)
+        print(f"  {label}: loading  ({spec or 'no quantization'})")
 
-        lm, decoder = build_arm(args.model, arm, bits, args.group_size)
+        lm, decoder = build_arm(args.model, spec, args.group_size)
         vision, connector = _vision_parts(lm.model)
         weight_bytes = resident_bytes(decoder, vision, connector)
 
-        predicted = ledger_prediction(arm, bits)
+        predicted = ledger_prediction(spec)
         delta = None if predicted is None else weight_bytes - predicted
         if delta is None:
             check = "no ledger on file"
@@ -344,7 +395,9 @@ def main(argv: list[str] | None = None) -> int:
         record = {
             "arm": arm,
             "bits": bits,
-            "group_size": args.group_size if bits != 16 else None,
+            "label": label,
+            "spec": spec,
+            "group_size": args.group_size if spec else None,
             "weight_bytes": weight_bytes,
             "weight_gib": round(weight_bytes / GIB, 4),
             "ledger_predicted_bytes": predicted,
@@ -395,14 +448,14 @@ def summarise(out_path: Path, n_queries: int) -> int:
     # leave the table still reading the inadequate one, which is worse than not fixing it.
     by_arm: dict[tuple[str, int], dict[str, Any]] = {}
     for row in parsed:
-        by_arm[(row["arm"], row["bits"])] = row
+        by_arm[row.get("label") or arm_label(row["arm"], row["bits"])] = row
     rows = list(by_arm.values())
     if len(parsed) > len(rows):
         print(f"  ({len(parsed) - len(rows)} superseded row(s) in the file; using the latest "
               "measurement of each arm)")
 
     baseline = next((r for r in rows if r["bits"] == 16), None)
-    print(f"{'arm':>8}{'bits':>6}{'weights':>10}{'peak':>8}{'tok/s':>9}{'vs fp16':>9}"
+    print(f"{'configuration':>14}{'weights':>10}{'peak':>8}{'tok/s':>9}{'vs fp16':>9}"
           f"{'TTFT':>8}{'ANLS':>8}{'n':>5}")
     for row in sorted(rows, key=lambda r: (-r["bits"], r["arm"])):
         decode = row["decode_tokens_per_s"]
@@ -411,7 +464,8 @@ def summarise(out_path: Path, n_queries: int) -> int:
             f"{speed / baseline['decode_tokens_per_s']['p50']:.2f}x"
             if baseline and baseline["decode_tokens_per_s"] else "--"
         )
-        print(f"{row['arm']:>8}{row['bits']:>6}{row['weight_gib']:>9.3f}G"
+        label = row.get("label") or arm_label(row["arm"], row["bits"])
+        print(f"{label:>14}{row['weight_gib']:>9.3f}G"
               f"{row['peak_allocated_bytes'] / GIB:>7.2f}G{speed:>9.2f}{relative:>9}"
               f"{row['ttft_s']['p50']:>7.2f}s{row['anls']:>8.4f}{row['n_scored']:>5}")
 
@@ -428,7 +482,8 @@ def summarise(out_path: Path, n_queries: int) -> int:
     thin = [r for r in rows if r["n_scored"] < r.get("n_requested", n_queries) * 0.5]
     for row in thin:
         expected = row.get("n_requested", n_queries)
-        print(f"\nWARNING: {row['arm']} @ int{row['bits']} scored only {row['n_scored']}/"
+        label = row.get("label") or arm_label(row["arm"], row["bits"])
+        print(f"\nWARNING: {label} scored only {row['n_scored']}/"
               f"{expected} requests -- that mean is over a biased subset.", file=sys.stderr)
     return 0
 
