@@ -428,9 +428,21 @@ Tolerances now come from that measurement rather than from whatever made the tes
 itself* is still worth having — if a future vocabulary or `lm_head` change made this optimisation
 pointless, that test says so rather than leaving a parameter nobody questions.
 
-**Note for comparability:** every number in `results/quant_ablation.jsonl` and
-`results/pruning_quality.jsonl` was measured *before* this fix. Their `peak_allocated_bytes` are
-therefore ~0.64 GiB higher than the same run would now report. The fix makes the pipeline better
+**The predicted saving was 2.4x too high, and the reason is the interesting part.** ⚠️ *measured
+2026-08-18.* Removing a 641 MiB allocation reduced measured peak by **271 MiB** (fp16 arm: 7.021 →
+6.75 GiB), not 641. Peak is a **max over time**, not a sum of what is resident: the logits tensor
+was the high-water mark by only 271 MiB, and deleting it simply revealed whatever the second
+highest moment was — somewhere in the vision tower or attention. The 641 MiB is still genuinely no
+longer allocated, which matters for fragmentation and for how much transient headroom a second
+concurrent request can find; the *peak* only fell by the margin the logits were winning by.
+
+Worth stating plainly because the mistake is easy to repeat: "this allocation is 641 MiB, so
+removing it saves 641 MiB of peak" is only true if that allocation is the peak by at least its own
+size. Predicting a peak reduction requires knowing the whole timeline, not one tensor.
+
+**Note for comparability:** every number in `results/pruning_quality.jsonl`, and the six arms in
+`results/quant_ablation.jsonl` measured before 2026-08-18, predate this fix. Their
+`peak_allocated_bytes` are ~271 MiB higher than the same run would now report. The fix makes the pipeline better
 and the historical peaks stale; both facts are true and the second one has to be stated wherever
 those files are quoted.
 

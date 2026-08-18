@@ -57,6 +57,17 @@ class Request:
     #: Set when the request is admitted; the scheduler owns the type.
     cache: Any = None
 
+    #: Pre-merged multimodal prompt embeddings, ``(1, prompt_len, hidden)``.
+    #:
+    #: A RAG request's prompt is not expressible as token ids alone: the retrieved page's visual
+    #: tokens exist only as vision-tower output merged into the embedding stream
+    #: (``merge_image_features``). ``prompt_token_ids`` still carries the full sequence *length*
+    #: and the ``<image>`` placeholders, so every length-based decision the scheduler makes --
+    #: admission, block budgeting, chunk boundaries -- is unchanged and still needs no tensors.
+    #: The executor prefers this when present and falls back to embedding the ids when it is not,
+    #: which is what keeps text-only requests working through the identical path.
+    prompt_embeds: Any = None
+
     #: Iteration indices, for TTFT and end-to-end latency.
     admitted_step: int | None = None
     first_token_step: int | None = None

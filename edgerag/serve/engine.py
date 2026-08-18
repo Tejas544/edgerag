@@ -188,12 +188,16 @@ class InferenceEngine:
             self.stats.steps += 1
             return
 
-        for request in batch.prefill:
+        # One pass over prefill and decode together, because **a request can do both in one
+        # iteration**: the final prefill chunk's last position is what produces the first
+        # generated token. Handling tokens only for `batch.decode` would drop that token, and the
+        # following decode step -- having nothing generated to feed -- would re-feed the last
+        # prompt token and emit it a second time.
+        for request in batch.requests:
             consumed = output.prefilled.get(request.request_id, 0)
             if consumed:
                 self.scheduler.on_prefill_chunk(request, consumed)
 
-        for request in batch.decode:
             token_id = output.tokens.get(request.request_id)
             if token_id is None:
                 continue

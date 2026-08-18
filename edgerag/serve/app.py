@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -72,9 +73,22 @@ class ServerState:
     engine: InferenceEngine
     tokenizer: Tokenizer
     model_id: str = "edgerag"
-    #: Turns a chat conversation into prompt token ids. Defaults to a plain concatenation; the
-    #: RAG pipeline substitutes one that retrieves documents and builds a multimodal prompt.
+    #: Turns a chat conversation into prompt token ids. Defaults to a plain concatenation.
     build_prompt: Any = None
+    #: A :class:`~edgerag.serve.pipeline.RagPipeline`. When set, the last user message is treated
+    #: as a question: pages are retrieved, encoded, and merged into the prompt embeddings, and the
+    #: keys of the pages actually used are reported back on the response. Absent, the server is a
+    #: plain text completion endpoint -- which is what every test that does not need a checkpoint
+    #: exercises.
+    rag: Any = None
+
+
+def _last_user_question(messages: list[ChatMessage]) -> str:
+    """The question to retrieve against: the last user turn, or the last turn if none is user."""
+    for message in reversed(messages):
+        if message.role == "user":
+            return message.content
+    return messages[-1].content
 
 
 def default_prompt_builder(tokenizer: Tokenizer, messages: Iterable[ChatMessage]) -> list[int]:
@@ -143,33 +157,47 @@ def create_app(state: ServerState) -> FastAPI:
         if not state.engine.is_running:
             raise HTTPException(status_code=503, detail="engine is not running")
 
-        prompt_ids = build_prompt(state.tokenizer, payload.messages)
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        retrieved: list[str] = []
+
+        if state.rag is not None:
+            # Retrieval and the vision tower run once per request, here -- not per prefill chunk
+            # inside the executor, which would re-encode the same pages ~14 times for a 7k prompt
+            # (see edgerag/serve/pipeline.py).
+            built = await run_in_threadpool(state.rag.build, _last_user_question(payload.messages))
+            prompt_ids, prompt_embeds, retrieved = built.token_ids, built.embeds, built.doc_keys
+        else:
+            prompt_ids, prompt_embeds = build_prompt(state.tokenizer, payload.messages), None
+
         if not prompt_ids:
             raise HTTPException(status_code=400, detail="prompt encoded to zero tokens")
 
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        created = int(time.time())
         request = Request(
             request_id=completion_id,
             prompt_token_ids=list(prompt_ids),
             max_new_tokens=payload.max_tokens,
+            prompt_embeds=prompt_embeds,
         )
 
         if payload.stream:
             return StreamingResponse(
-                _stream(state, request, completion_id, created),
+                _stream(state, request, completion_id, created, retrieved),
                 media_type="text/event-stream",
                 # Proxies that buffer will hold every token until the response completes, which
                 # turns a streaming endpoint into a slow non-streaming one with no visible error.
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return await _collect(state, request, completion_id, created, len(prompt_ids))
+        return await _collect(
+            state, request, completion_id, created, len(prompt_ids), retrieved
+        )
 
     return app
 
 
 async def _stream(
-    state: ServerState, request: Request, completion_id: str, created: int
+    state: ServerState, request: Request, completion_id: str, created: int,
+    retrieved: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """SSE, decoded incrementally.
 
@@ -178,8 +206,12 @@ async def _stream(
     splits a single emoji or accented letter across several ids, and per-token decoding emits
     replacement characters where the text should be.
     """
-    yield _chunk(completion_id, state.model_id, created,
-                 delta={"role": "assistant"}, finish_reason=None)
+    # The retrieved pages ride on the opening chunk: a client that streams an answer and never
+    # learns which documents produced it cannot check the answer against them.
+    opening: dict[str, Any] = {"role": "assistant"}
+    if retrieved:
+        opening["retrieved"] = retrieved
+    yield _chunk(completion_id, state.model_id, created, delta=opening, finish_reason=None)
 
     token_ids: list[int] = []
     text_so_far = ""
@@ -207,7 +239,8 @@ async def _stream(
 
 
 async def _collect(
-    state: ServerState, request: Request, completion_id: str, created: int, prompt_tokens: int
+    state: ServerState, request: Request, completion_id: str, created: int, prompt_tokens: int,
+    retrieved: list[str] | None = None,
 ) -> dict[str, Any]:
     token_ids: list[int] = []
     finish_reason = "stop"
@@ -234,6 +267,7 @@ async def _collect(
                 "finish_reason": finish_reason,
             }
         ],
+        "retrieved": retrieved or [],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": len(token_ids),

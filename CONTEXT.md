@@ -1175,6 +1175,63 @@ the same run would now report.
 
 ---
 
+## D24 · The ship configuration is mixed precision, and it is measured · **MEASURED** · 2026-08-18
+
+Closes D23's two open items: the contaminated `fp16` baseline (B-10) is re-measured at n=40, and
+the mixed-precision arm D23 finding 2 argued for now exists and has been run.
+
+| configuration | weights | ledger Δ | peak | tok/s | ANLS | % of fp16 |
+|---|---:|---:|---:|---:|---:|---:|
+| **fp16** | 4.185 G | **0 B** | 6.75 G | 13.94 | **0.4378** | 100% |
+| LM@int8 | 2.708 G | **0 B** | 5.54 G | 5.19 | 0.4378 | 100% |
+| LM+ViT@int8 | 2.435 G | **0 B** | 5.29 G | 5.16 | 0.4328 | 99% |
+| ViT@int8 | 3.911 G | **0 B** | 6.75 G | 13.74 | 0.4503 | 103% |
+| LM@int4 | 1.958 G | **0 B** | 4.79 G | 3.79 | 0.2469 | 56% |
+| LM+ViT@int4 | 1.546 G | **0 B** | 4.37 G | 3.31 | 0.2621 | 60% |
+| ViT@int4 | 3.772 G | **0 B** | 6.60 G | 11.90 | 0.4274 | 98% |
+| **LM8+ViT4** | **2.296 G** | **0 B** | **4.86 G** | 5.58 | **0.4193** | **96%** |
+
+**Finding 1 — INT8 on the language model is answer-identical, now confirmed three ways.** The
+properly-measured `fp16` baseline scores **0.4378**, matching `LM@int8` on every printed digit —
+and `LM@int8` was already bit-identical (0.4378445165945166) to D20's independently-measured fp16
+baseline from the *pruning* run. Three measurements, two different scripts, one number.
+
+**Finding 2 — the mixed configuration is the one to ship, and it was predicted before it was
+run.** `LM8+ViT4` weighs **2.296 GiB, exactly what the local ledger predicted** (delta 0 bytes),
+and scores 0.4193 against fp16's 0.4378 — a gap of 0.0185, or **0.31σ** at this sample size.
+Statistically indistinguishable from full precision at **1.82× compression**. Against the
+alternative that uniform quantization offers, `LM+ViT@int4` gives 2.71× and keeps 60% of quality.
+**0.75 GiB buys back 36 points of ANLS.**
+
+**Finding 3 — the ViT control passes, and retroactively explains D23's throughput noise.** With a
+correctly measured baseline, `ViT@int8` runs at **0.99×** fp16 — the tower is not in the decode
+loop, and now the measurement says so. `ViT@int4`'s 0.85× is unchanged and is *session variance*,
+not an effect: the three sessions separate cleanly.
+
+| session | arms | speed |
+|---|---|---|
+| 1 | LM@4, LM+ViT@4, ViT@4, LM@8, LM+ViT@8 | ~15% slow |
+| 2 | ViT@8 | reference |
+| 3 | fp16, LM8+ViT4 | agrees with session 2 to **1.4%** |
+
+Two sessions agreeing to 1.4% while a third sits 15% low is D14 finding 5b with a cleaner control
+than D14 had. **The consequence for reading the table: every `vs fp16` ratio for a session-1 arm
+is understated by roughly 15%.** INT8-language is ~0.37–0.43× and INT4-language ~0.24–0.31×; the
+~4× INT4 regression D7 predicted survives easily, the second decimal place does not.
+
+**Finding 4 — B-09's fix works and my estimate of it was 2.4× too high.** Peak fell 7.021 → 6.75
+GiB, a **271 MiB** reduction from removing a **641 MiB** allocation. Peak is a max over time: the
+logits tensor was the high-water mark by only 271 MiB, so deleting it revealed the next-highest
+moment. The allocation is still gone — which is what matters for fragmentation and concurrent
+headroom — but predicting a peak reduction needs the whole timeline, not one tensor's size.
+
+**Open, and cheap to close:** the `LM8+ViT4` throughput (5.58 tok/s) sits in session 3 while
+`LM@int8` (5.19) sits in session 1, so the comparison between the two INT8-language arms carries
+the 15% band. A single-session re-run of all eight arms would produce a publishable latency
+column; nothing else in this table needs re-measuring.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
