@@ -37,6 +37,7 @@ import gc
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,12 @@ ARMS: dict[str, tuple[str, ...]] = {
 MIXED_ARMS: dict[str, dict[str, int]] = {
     "LM8+ViT4": {"language": 8, "vision": 4, "connector": 4},
 }
+
+#: One value per process, stamped into every record. D24 finding 3 is why: the throughput column
+#: spanned three Colab sessions carrying D14's 12-14% clock variance, and that was only recoverable
+#: by remembering which arms were run when. "All eight arms in one session" should be a property
+#: the file can be checked for, not a claim about how the run was done.
+SESSION_ID = uuid.uuid4().hex[:12]
 
 BLOCK_SIZE = 16
 
@@ -328,6 +335,15 @@ def main(argv: list[str] | None = None) -> int:
             "script exists to measure. 640 x 16 tokens covers a 7k prompt at ~1.9 GiB."
         ),
     )
+    parser.add_argument(
+        "--out-name", default="quant_ablation.jsonl",
+        help=(
+            "results filename. A latency-only sweep writes its own file rather than appending to "
+            "the quality table: with a small --n-queries its ANLS column is not comparable to a "
+            "40-query run, and summarise() takes the last row per arm, so mixing them would "
+            "quietly replace good quality numbers with thin ones."
+        ),
+    )
     parser.add_argument("--allow-untrusted-device", action="store_true")
     args = parser.parse_args(argv)
 
@@ -358,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.drive) if args.drive else (REPO_ROOT / "results")
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "quant_ablation.jsonl"
+    out_path = out_dir / args.out_name
     done = completed_arms(out_path, args.n_queries, args.trials)
     if done:
         print(f"resuming: {len(done)} arm(s) already measured to this standard "
@@ -426,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
             "trials": args.trials,
             "workload_fingerprint": fingerprint,
             "code_version": code_version(),
+            "session_id": SESSION_ID,
             "device": info.name,
             "trusted": info.trusted,
             **measured,
@@ -496,6 +513,27 @@ def summarise(out_path: Path, n_queries: int) -> int:
     print("  carry a different sample size than this invocation's --n-queries.")
     print("  `peak` is measured, so CONTEXT.md D21's inferred activation line can now be replaced")
     print("  with arithmetic on these numbers rather than on a median request length.")
+
+    # Whether the latency column is comparable at all. Rows written before session stamping
+    # existed count as one unknown session -- they are the multi-session table D24 documented.
+    sessions = {row.get("session_id", "pre-stamping") for row in rows}
+    versions = {row.get("code_version", "unknown") for row in rows}
+    stamped = sessions - {"pre-stamping"}
+
+    if sessions == {"pre-stamping"}:
+        print("\n  ** SESSION PROVENANCE NOT RECORDED ** -- every row predates session stamping,")
+        print("  so whether these were measured together cannot be established from the file.")
+        print("  Treat the tok/s column as spanning sessions until a stamped re-run replaces it.")
+    elif len(sessions) == 1:
+        print(f"\n  SINGLE SESSION ({stamped.pop()}): the tok/s column is internally comparable.")
+    else:
+        print(f"\n  ** {len(sessions)} SESSIONS in this table ({', '.join(sorted(sessions))}) **")
+        print("  Cross-session latency carries ~12-14% clock variance (CONTEXT.md D14 finding 5b),")
+        print("  so `vs fp16` is only trustworthy between rows sharing a session. Memory is")
+        print("  bit-reproducible across sessions and is unaffected.")
+    if len(versions) > 1:
+        print(f"  ** {len(versions)} CODE VERSIONS ({', '.join(sorted(versions))}) ** -- `peak` is")
+        print("  not comparable across them; weights and ANLS are.")
 
     # `n_requested` is per-row and present on anything measured after this field was added; older
     # rows fall back to this invocation's --n-queries, the best available guess for them.

@@ -296,3 +296,65 @@ def test_the_mixed_arm_really_builds_two_precisions_at_once(tmp_path) -> None:
         assert {m.config.bits for m in vision} == {4}, "vision should be INT4"
     finally:
         del decoder, lm
+
+
+# --- session provenance: is this table internally comparable? ----------------------------------
+
+
+def _row(label: str, **over):
+    base = {
+        "arm": label, "bits": 4, "label": label, "weight_gib": 2.0, "peak_allocated_bytes": 0,
+        "decode_tokens_per_s": {"p50": 10.0}, "ttft_s": {"p50": 1.0}, "anls": 0.4,
+        "n_scored": 40, "n_requested": 40, "code_version": "abc1234", "session_id": "sess-one",
+    }
+    return {**base, **over}
+
+
+def test_a_single_session_table_says_so(tmp_path, capsys) -> None:
+    """The point of a single-session re-run is that the file can be checked, not vouched for."""
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(_row(n)) for n in ("fp16", "LM@int4")), encoding="utf-8"
+    )
+    summarise(path, 40)
+    out = capsys.readouterr().out
+    assert "SINGLE SESSION" in out
+    assert "SESSIONS in this table" not in out
+
+
+def test_a_table_spanning_sessions_is_flagged(tmp_path, capsys) -> None:
+    """D24 finding 3: this is exactly the condition that made the tok/s column unpublishable."""
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(
+        json.dumps(_row("fp16")) + "\n" + json.dumps(_row("LM@int4", session_id="sess-two")),
+        encoding="utf-8",
+    )
+    summarise(path, 40)
+    out = capsys.readouterr().out
+    assert "2 SESSIONS in this table" in out
+    assert "12-14%" in out
+
+
+def test_rows_predating_session_stamping_count_as_unknown(tmp_path, capsys) -> None:
+    """Silence would imply single-session, which is the one thing those rows cannot promise."""
+    path = tmp_path / "quant_ablation.jsonl"
+    old = _row("fp16")
+    del old["session_id"]
+    path.write_text(json.dumps(old), encoding="utf-8")
+    summarise(path, 40)
+    out = capsys.readouterr().out
+    assert "SESSION PROVENANCE NOT RECORDED" in out
+    assert "SINGLE SESSION" not in out
+
+
+def test_mixed_code_versions_are_flagged_against_the_peak_column(tmp_path, capsys) -> None:
+    """B-09 changed the transient term by 272 MiB; a table mixing versions must not hide it."""
+    path = tmp_path / "quant_ablation.jsonl"
+    path.write_text(
+        json.dumps(_row("fp16")) + "\n" + json.dumps(_row("LM@int4", code_version="def5678")),
+        encoding="utf-8",
+    )
+    summarise(path, 40)
+    out = capsys.readouterr().out
+    assert "2 CODE VERSIONS" in out
+    assert "not comparable" in out

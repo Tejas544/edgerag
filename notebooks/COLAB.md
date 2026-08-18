@@ -152,6 +152,45 @@ Smoke test first if quota is tight — one arm, two queries, about four minutes:
 Resumable per arm: a completed arm is appended to the file and skipped on the next invocation, so
 a disconnect costs one arm rather than the session.
 
+### 8b · The single-session latency sweep — ~18 min
+
+`CONTEXT.md` D24 finding 3 left one caveat open: the `tok/s` column was assembled across three
+Colab sessions, and D14 finding 5b measured 12–14% clock variance between them. Two sessions
+agreed to 1.4% while a third sat 15% low, which is visible in the `ViT` arms — they cannot affect
+decode speed at all and still differ.
+
+**Only latency needs re-measuring.** Quality and weights are session-independent, and that is
+evidence rather than assumption: `fp16`, `LM@int8` and D20's independent pruning run all scored
+`0.4378445165945166` — the same float, three sessions, two scripts — and `ledger_delta_bytes` is
+0 on every arm every time. Re-running the 40-query quality loop would spend 36 of 54 minutes
+reproducing numbers that provably cannot move, and would triple the disconnect risk on the one
+measurement that actually needs a controlled session.
+
+So: all eight arms, one session, two queries each, and the time saved buys **5 trials instead of
+3** on the thing being measured.
+
+```python
+!python -m scripts.colab_quant_ablation --drive /content/drive/MyDrive/edgerag     --out-name quant_latency.jsonl --n-queries 2 --trials 5
+```
+
+It writes its own file rather than appending to the quality table: `summarise()` keeps the last
+row per arm, so a 2-query ANLS would quietly replace the 40-query numbers.
+
+**The last line is the point.** It must read `SINGLE SESSION (<id>)`. Every record now carries a
+`session_id` generated once per process, so "all eight arms in one session" is a property the file
+can be checked for rather than a claim about how you ran it. If it says `2 SESSIONS`, the run was
+interrupted and resumed — the numbers are still usable, but the `vs fp16` column is only
+trustworthy between rows sharing an id.
+
+Two checks while it runs:
+
+- **`ViT@int8` and `ViT@int4` should now land within a couple of percent of `fp16`.** That is the
+  built-in control: the vision tower is not in the decode loop, so quantizing it cannot change
+  decode speed. In the multi-session table they differed by 13.4%, which was the confound showing
+  itself.
+- **INT4 should still be ~4× slower than fp16.** That is D7's prediction and it survives the noise;
+  what the clean session buys is the second decimal place, not the headline.
+
 ### 9 · Boot the server and ask it a question — ~3 min
 
 Phase 7's gate end to end: retrieval, the quantized model, the paged cache, and streaming HTTP.
