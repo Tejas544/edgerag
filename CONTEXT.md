@@ -1232,7 +1232,36 @@ than D14 had.
 > variance at all. **`ViT@int4` is precisely the arm the interrupted sweep did not reach**, so this
 > resolves on completion and not before. Finding 3's *conclusion* — that cross-session tok/s
 > comparisons are untrustworthy — is unaffected and if anything strengthened; what is withdrawn is
-> the tidy "session 1 was uniformly slow" mechanism offered for it. **The consequence for reading the table: every `vs fp16` ratio for a session-1 arm
+> the tidy "session 1 was uniformly slow" mechanism offered for it.
+>
+> ### ✅ Resolved 2026-08-19 — the control passes, and the right variable is language precision
+>
+> A second single-session sweep reached six of eight arms before its runtime was reclaimed
+> (`ViT@int8` died during weight load; `LM8+ViT4` never started). Figures below are read from that
+> run's console output at the precision it prints; the JSONL lands in `results/` when retrieved
+> from Drive.
+> **`ViT@int4` measured 12.92 tok/s against fp16's 13.24 — 0.976×**, inside the ~2% within-session
+> spread. The vision tower does not move decode speed, exactly as the control asserts. The 0.85×
+> was an artifact of dividing across sessions.
+>
+> Grouping the six arms by *language* precision — the only thing in the decode loop — leaves
+> nothing unexplained:
+>
+> | language | arms | within-group spread | vs fp16 |
+> |---|---|---:|---:|
+> | fp16 | `fp16`, `ViT@int4` | 2.4% | 1.000× |
+> | INT8 | `LM@int8`, `LM+ViT@int8` | 1.3% | 0.419× |
+> | INT4 | `LM@int4`, `LM+ViT@int4` | 2.0% | 0.265× |
+>
+> Arms differing *only* in vision precision agree to within 2.4%; arms differing in language
+> precision separate by 2.4× and 3.8×. **Decode throughput is a function of the language model's
+> precision and nothing else**, which is what D7 predicted from the roofline and what the
+> multi-session table was too noisy to show.
+>
+> The variance numbers, now that both exist: **within-session ~2%, across-session ~7.5%** (fp16
+> measured at 13.24, 13.94 and 14.31 in three sessions). So a cross-session comparison cannot
+> resolve anything under about 10% — which is precisely how a 0.976× control came to read as
+> 0.85× and get written up as a session-speed mechanism. **The consequence for reading the table: every `vs fp16` ratio for a session-1 arm
 is understated by roughly 15%.** INT8-language is ~0.37–0.43× and INT4-language ~0.24–0.31×; the
 ~4× INT4 regression D7 predicted survives easily, the second decimal place does not.
 
