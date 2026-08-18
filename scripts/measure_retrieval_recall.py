@@ -5,10 +5,19 @@
 
 Runs entirely on the local tier (``CONTEXT.md`` D4) -- this is a *correctness and quality*
 measurement, not a latency one, so it needs no T4. It does need real time: embedding every corpus
-document costs one vision-tower forward per page, measured at ~8s/image on a GTX 1650 with the
+document costs one vision-tower forward per page, measured at ~9s/image on a GTX 1650 with the
 256M fixture (``embed_image`` is not the fast path anything else in this project calls; nothing
-upstream of it was built for throughput). 362 documents is comfortably under an hour; budget more
-for the 2.2B headline model's larger tower.
+upstream of it was built for throughput). 362 documents is under an hour; budget more for the
+2.2B headline model's larger tower.
+
+**Document embeddings are cached to disk, one line per document, flushed as each is computed.**
+The first run of this script cost that hour and then crashed one line later on an unrelated bug
+in the query-embedding step -- correct in the loop that had already spent 56 minutes, wrong in
+the seconds-long loop after it, and because nothing had been persisted, the expensive half had to
+be redone from nothing. That is ``BUGS.md`` B-05's shape again: a long-running measurement with no
+checkpoint turns any late failure into a full re-run. The cache is what the Colab scripts already
+do for exactly this reason (append-and-flush per arm/config); a local script that runs for the
+better part of an hour deserves the same discipline.
 
 **This script exists to answer one question honestly: does the image-space query signal
 (``embed_query_for_image_space``, projecting query text through ``embed_tokens`` into the same
@@ -23,20 +32,48 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image
 
 from edgerag.core.loader import HEADLINE_MODEL, load_model
+from edgerag.core.model import load_from_hf
 from edgerag.retrieval.corpus import load_corpus
 from edgerag.retrieval.embed import embed_image, embed_query_for_image_space
 from edgerag.retrieval.index import DEFAULT_ALPHA, FlatIndex, recall_at_k
 from edgerag.retrieval.trace import load_trace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CACHE_DIR = REPO_ROOT / "results" / "embedding_cache"
+
+
+def _cache_path(model_id: str) -> Path:
+    slug = re.sub(r"[^a-zA-Z0-9._-]", "_", model_id)
+    return CACHE_DIR / f"{slug}.jsonl"
+
+
+def _load_cache(model_id: str) -> dict[str, np.ndarray]:
+    path = _cache_path(model_id)
+    if not path.exists():
+        return {}
+    cached = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            cached[row["doc_key"]] = np.array(row["embedding"], dtype=np.float32)
+    return cached
+
+
+def _append_cache(model_id: str, doc_key: str, vector: np.ndarray) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with _cache_path(model_id).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"doc_key": doc_key, "embedding": vector.tolist()}) + "\n")
+        fh.flush()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device)
     dtype = torch.float16 if device.type == "cuda" else torch.float32
     lm = load_model(args.model, device=device, dtype=dtype)
+    # embed_image takes the raw HF module (it drives encode_images_chunked, which expects HF's
+    # tree). embed_query_for_image_space needs embed_tokens on *our* decoder -- the HF model has
+    # no such top-level attribute (it is nested under model.text_model), so this has to be built.
+    decoder = load_from_hf(lm.spec, lm.model)
 
     docs = load_corpus()
     trace = load_trace()
@@ -59,18 +100,24 @@ def main(argv: list[str] | None = None) -> int:
         queries = queries[: args.n_queries]
     print(f"{len(docs)} corpus documents, {len(queries)} held-out queries")
 
-    print(f"embedding {len(docs)} documents ({args.model}, {device})...")
-    t0 = time.time()
-    image_embeddings: dict[str, object] = {}
-    for i, doc in enumerate(docs):
-        image_path = REPO_ROOT / doc.image_path
-        with Image.open(image_path).convert("RGB") as image:
-            image_embeddings[doc.doc_key] = embed_image(lm.model, lm.processor, image, device)
-        if (i + 1) % 50 == 0 or i + 1 == len(docs):
-            elapsed = time.time() - t0
-            rate = (i + 1) / elapsed
-            remaining = (len(docs) - i - 1) / rate if rate else 0
-            print(f"  {i + 1}/{len(docs)}  ({elapsed:.0f}s elapsed, ~{remaining:.0f}s left)")
+    image_embeddings = _load_cache(args.model)
+    todo = [d for d in docs if d.doc_key not in image_embeddings]
+    if image_embeddings:
+        print(f"{len(image_embeddings)}/{len(docs)} document embeddings already cached")
+    if todo:
+        print(f"embedding {len(todo)} documents ({args.model}, {device})...")
+        t0 = time.time()
+        for i, doc in enumerate(todo):
+            image_path = REPO_ROOT / doc.image_path
+            with Image.open(image_path).convert("RGB") as image:
+                vector = embed_image(lm.model, lm.processor, image, device)
+            image_embeddings[doc.doc_key] = vector
+            _append_cache(args.model, doc.doc_key, vector)
+            if (i + 1) % 50 == 0 or i + 1 == len(todo):
+                elapsed = time.time() - t0
+                rate = (i + 1) / elapsed
+                remaining = (len(todo) - i - 1) / rate if rate else 0
+                print(f"  {i + 1}/{len(todo)}  ({elapsed:.0f}s elapsed, ~{remaining:.0f}s left)")
 
     index = FlatIndex.build(docs, image_embeddings, alpha=args.alpha)
     print(f"index built: {len(docs)} docs, vocab_size={index.vectorizer.vocab_size}, "
@@ -78,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"embedding {len(queries)} query questions...")
     query_vectors = {
-        q.query_id: embed_query_for_image_space(lm.model, lm.processor, q.question, device)
+        q.query_id: embed_query_for_image_space(decoder, lm.processor, q.question, device)
         for q in queries
     }
 

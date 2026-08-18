@@ -24,6 +24,10 @@ data/**/*.pdf
 # browsing results/.
 results/dry_run.jsonl
 
+# A resumability cache, not a finding -- regenerable from the corpus in ~1hr/model, and large
+# enough (one line per document, one float per hidden dim) not to want in git history.
+results/embedding_cache/
+
 .ipynb_checkpoints/
 .env
 
