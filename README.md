@@ -10,10 +10,10 @@ written here, not imported.
 > **Status: Phase 7 of 8 (Aug 19, 2026).** The decoder, paged KV cache, scheduler, visual-token
 > compressor, INT4 quantization, hybrid retrieval and the streaming server are built and measured
 > — `/v1/chat/completions` answers a document question from retrieved pages on the 2.2B model, at
-> 2.30 GiB of weights. Phase 8 is the architecture diagram and the final write-up. Every number
-> below is measured or exactly computed, with its source file named; what is still unmeasured is
-> listed under [Known limitations](#known-limitations) rather than left blank. See
-> [`PLAN.md`](PLAN.md) for the phase schedule.
+> 2.30 GiB of weights. Phase 8 is the final write-up. Every number below is measured or exactly
+> computed, with its source file named; what is still unmeasured is listed under
+> [Known limitations](#known-limitations) rather than left blank. See [`PLAN.md`](PLAN.md) for
+> the phase schedule.
 
 ---
 
@@ -30,26 +30,65 @@ is not a config flag on a large card; it is the machine.
 
 ## Architecture
 
-_Diagram lands in Phase 8._
+What actually runs when a question arrives. **The `queue.Queue` edge is the boundary that matters**:
+everything below it runs on one dedicated thread, one forward pass at a time. Above it, the
+*event loop* never touches a tensor — the vision tower does, but on a threadpool thread and
+exactly once per request, never inside the decode loop. Getting that split wrong (`BUGS.md` P-17)
+inflates every *other* request's time-to-first-token by however long one forward pass takes, and
+it presents as a model problem rather than a threading one.
 
+```mermaid
+flowchart TB
+    REQ["POST /v1/chat/completions"]
+    APP["FastAPI handler<br/><i>asyncio event loop</i>"]
+    OUT["SSE chunks stream out<br/><i>asyncio event loop</i>"]
+
+    subgraph PREP["once per request, on a threadpool thread"]
+        RET["FlatIndex, TF-IDF over OCR text<br/>top-5 pages"]
+        VIS["HF vision tower + connector<br/>INT4"]
+        MRG["merge into the embedding stream<br/>prompt_embeds"]
+    end
+
+    subgraph WORK["engine worker thread, EVERY tensor operation"]
+        SCH["Scheduler, decides only<br/>admission, block budget, chunk boundaries"]
+        EXE["ModelExecutor, computes<br/>our decoder, INT8, 512-token chunks"]
+        POOL[("shared paged KV pool<br/>640 blocks x 16 tokens")]
+    end
+
+    REQ --> APP
+    APP -->|"run_in_threadpool"| RET
+    RET --> VIS
+    VIS --> MRG
+    MRG -->|"queue.Queue"| SCH
+    SCH -->|"Batch"| EXE
+    EXE -->|"one block table each"| POOL
+    EXE -->|"token"| SCH
+    EXE -->|"loop.call_soon_threadsafe"| OUT
 ```
-corpus (images + text)
-   │
-   ├─ offline: SigLIP tower ──► image embeddings ──┐
-   └─ offline: text encoder ──► text embeddings ───┤
-                                                   ▼
-query ──► hybrid retrieval ──► top-k docs ──► prefix-shared KV blocks
-                                                   │
-                                     ┌─────────────┴─────────────┐
-                                     │  visual token compression │
-                                     └─────────────┬─────────────┘
-                                                   ▼
-                       paged KV cache ◄──► continuous-batching scheduler
-                                                   │
-                                         INT4 quantized VLM decode
-                                                   ▼
-                                         streaming response
-```
+
+Three things the picture is making explicit:
+
+- **The scheduler decides; the executor computes.** `edgerag/sched/` contains no tensors at all,
+  which is why its state machine — admission, chunked prefill, preemption policy — is tested in
+  milliseconds without a GPU, and why a scheduling bug can never be mistaken for a cache bug.
+- **Retrieval and the vision tower run once per request, before the queue.** Inside the executor
+  they would re-run on every prefill chunk — about 14 times for a 7,000-token prompt.
+- **One pool, many block tables.** The arena is allocated once at startup; each request gets an
+  index into it. A pool per request is `BUGS.md` B-05, and it cost a full T4 session.
+
+Resident at the default configuration: **2.30 GiB of weights** (INT8 language + INT4 vision) plus
+a **1.88 GiB block pool**, against a 4 GiB budget — the arithmetic is
+[`results/memory_ledger.md`](results/memory_ledger.md).
+
+**Built and measured, deliberately not in this path.** Saying so is the point: each is real code
+with real numbers behind it, and none of it is load-bearing for the server as configured.
+
+| Component | Status |
+|---|---|
+| FastV visual-token pruning | measured (D17/D20); the executor passes no compressor — quality cost is too high to default to |
+| Copy-on-write prefix sharing | measured 8.3%, 14.8% under canonical document ordering (D15); the executor gives each request its own block table |
+| Preemption (swap-to-host) | implemented behind the scheduler's interface (D16); the executor grows blocks directly, so pool exhaustion fails the request instead |
+| Image-space retrieval | measured out to noise (D22), so the index scores text only |
 
 ---
 
