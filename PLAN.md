@@ -228,7 +228,9 @@ Splits the same way Phase 4 did: **logic and correctness are local, every number
 **Cut line if time runs short:** 5e's Poisson harness before 5c's chunked prefill. A correct
 scheduler with a measured TTFT problem is a better result than an unmeasured scheduler.
 
-> **5e is measured — `CONTEXT.md` D25, 2026-08-19.** Saturation knee at 2× offered load;
+> **5e is measured — `CONTEXT.md` D25, 2026-08-19.** Sustained capacity **11.5–12.1 req/min**,
+> reproduced in two sessions, against 9.4–9.7 serial — so continuous batching buys 1.18–1.29× and
+> the knee sits near **1.2×**, not at the 2× the sampling grid first suggested;
 > throughput 2.29× for 3.53× mean in-flight, then flat while p95 TTFT keeps climbing. The
 > prediction that chunked prefill would win TTFT is **wrong**: it costs 1.51× on p95 TTFT and buys
 > 4.2× on the decode phase, netting 1.23× end to end. The phase's own instruction — record the
