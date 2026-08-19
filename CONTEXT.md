@@ -1320,13 +1320,42 @@ Calibration, one request alone: **6.19 s end to end, 3.78 s TTFT, 2.41 s of deco
 > concluding a 16× regression has compared two different quantities — which is why `req/min` is
 > reported beside it and why the README carries the same warning.
 
-**Finding 1 — the knee is at 2× offered load, and prediction 1 holds.** Throughput rises
-**2.29×** (0.7 → 1.6 tok/s) for **3.53×** the mean in-flight depth (0.38 → 1.34). Sublinear,
-exactly as D14's bandwidth argument requires: this checkpoint is MHA, decode is bound on KV reads
-at 192 KiB/token, and a scheduler cannot move bytes faster than the card moves them. Past 2× the
-throughput column is **flat** (1.6 → 1.6) while p95 TTFT nearly doubles (25.62 → 43.10 s).
-Prediction 3 holds too — an open loop has no backpressure, so beyond saturation offered load buys
-queue and nothing else.
+**Finding 1 — capacity is 11.4 req/min and saturation sits near 1.2×, not at the 2× the 12-request
+sweep appeared to show.** Throughput rises **2.25×** (0.7 → 1.6 tok/s) for **3.87×** the mean
+in-flight depth (0.38 → 1.45). Sublinear, exactly as D14's bandwidth argument requires: this
+checkpoint is MHA, decode is bound on KV reads at 192 KiB/token, and a scheduler cannot move bytes
+faster than the card moves them. Prediction 1 holds.
+
+Prediction 3 holds far harder than intended, and it invalidates the first reading of this table.
+Comparing offered rate against *achieved* rate:
+
+| cell | n | offered | served | ρ | expected ρ if stable | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| 0.5× | 12 | 0.081 | 0.083 | 0.97 | 1.04 | stable |
+| 1.0× | 12 | 0.162 | 0.149 | 1.09 | 1.08 | stable |
+| 2.0× | 12 | 0.323 | 0.193 | **1.68** | 1.17 | **saturated** |
+| 4.0× | 12 | 0.647 | 0.188 | **3.44** | 1.33 | **saturated** |
+| 2.0× | **100** | 0.313 | 0.202 | **1.55** | 1.02 | **saturated** |
+
+Sustained capacity is **0.19–0.20 req/s = 11.4 req/min**, against 9.7 req/min for strictly serial
+service — so concurrency buys **1.18×** and saturation sits just past 1× offered load. The 2× and
+4× rows were *both already past it*, and their tidy-looking TTFT numbers are an artifact of a
+12-request run ending before its queue did.
+
+**The 100-request cell is what proves it.** Same code, same session, same 2× offered load, TTFT
+by arrival decile:
+
+| requests | 0–9 | 10–19 | 20–29 | 40–49 | 60–69 | 80–89 | 90–99 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| mean TTFT | 9.5 s | 32.0 s | 56.5 s | 113.1 s | 153.1 s | 189.6 s | **209.5 s** |
+
+It climbs for the entire run and never flattens. p99 TTFT reads **26.1 s at n=12 and 221.7 s at
+n=100** — and n=100 is the one where `p99_is_reliable` is finally `true`. **Both numbers are
+worthless as server properties.** Past saturation the k-th arrival waits about
+`k × (1/served − 1/offered)`, so the tail grows linearly with `--n-requests`: the model predicts
+25 s at 2× and 45 s at 4× against measured 26.1 s and 44.7 s. Adding samples to a saturated cell
+does not converge an unbounded quantity, it walks further up the ramp. **The only publishable
+latency here is the 1× row: TTFT p50 5.30 s, p95 12.67 s, against 6.19 s served alone.**
 
 **Finding 2 — prediction 2 is falsified on TTFT, and the decomposition is what rescues it.**
 Same offered load, same arrival seed, one variable:
@@ -1338,22 +1367,28 @@ Same offered load, same arrival seed, one variable:
 
 Chunking is **1.51× worse on p95 TTFT** — the opposite of the prediction — and **1.23× better end
 to end**. Both are true because TTFT and the decode phase move in opposite directions and their
-sum hides it. Splitting end-to-end into *waiting to be admitted* and *generating once admitted*:
+sum hides it. Note both arms are past saturation (finding 1), so read this as a *paired contrast
+under identical overload*, which is what it is, and not as a latency figure for either arm.
+Splitting end-to-end into *waiting to be admitted* and *generating once admitted*:
 
-| arm | TTFT p50 | decode phase | tok/s while decoding |
+The two arms served **identical token counts request for request** — same seed, same prompt cycle
+— so this is a true paired comparison rather than two distributions laid side by side:
+
+| arm | TTFT p50 | decode phase p50 | decode rate p50 |
 |---|---:|---:|---:|
-| chunked (512) | 13.13 s | **2.75 s** | 5.8 |
-| unchunked | 7.89 s | **11.57 s** | 1.4 |
+| chunked (512) | 13.13 s | **2.06 s** | **2.91 tok/s** |
+| unchunked | 7.89 s | **9.49 s** | **0.90 tok/s** |
 
-The chunked arm's decode runs at 5.8 tok/s — the single-request rate. The unchunked arm's runs at
-1.4, **4.2× slower**. That is `BUGS.md` P-18 happening: an unchunked 7,603-token prefill occupies
-one whole iteration, and every request already decoding stalls for the length of it. **Chunked
-prefill does exactly the job it was built for.** What it does not do is help TTFT.
+**Chunking decodes faster on 12 of 12 paired requests**, median ratio **3.02×** (range 1.81–6.43×).
+That is `BUGS.md` P-18 happening: an unchunked 7,603-token prefill occupies one whole iteration,
+and every request already decoding stalls for the length of it. **Chunked prefill does exactly the
+job it was built for.** What it does not do is help TTFT.
 
-> These decode figures are `e2e p50 − TTFT p50`, which is not `p50(e2e − TTFT)` unless the two are
-> perfectly rank-correlated. They are indicative of a 4× effect, not exact. `summarise()` now
-> computes the per-request version from the stored outcomes; the exact numbers land when the JSONL
-> is committed.
+> Corrects an earlier reading of this entry. Taking `e2e p50 − TTFT p50` and dividing by 16 tokens
+> gave "5.8 tok/s, the single-request rate", which was wrong twice: the median request generates
+> ~7.5 tokens, not 16, and the median of a difference is not the difference of medians. The paired
+> figure is **2.91 tok/s — still 2.3× below the 6.6 tok/s a request gets served alone.** Chunking
+> recovers most of the head-of-line loss; it does not make concurrent decode free.
 
 **Finding 3 — the TTFT regression is admission queueing, and `max_prefills_per_step=1` is the
 cause.** `Scheduler.schedule()` admits a waiting request only while

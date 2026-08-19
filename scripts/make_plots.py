@@ -368,9 +368,15 @@ def plot_serving_tradeoff() -> Path:
     tail.plot(loads, ttft_p50, color=ORANGE, linewidth=1.4, linestyle=(0, (4, 3)),
               marker="s", markersize=4, markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
 
-    ax.text(loads[-1], throughput[-1], "  throughput", fontsize=9.5, color=BLUE, va="center")
-    tail.text(loads[-1], ttft_p95[-1], "  TTFT p95", fontsize=9.5, color=ORANGE, va="center")
-    tail.text(loads[-1], ttft_p50[-1], "  p50", fontsize=9, color=ORANGE, va="center", alpha=0.8)
+    # The two solid series converge at the right edge on this data -- throughput has gone flat
+    # while the tail is still climbing -- so their end labels overlap if both sit on the mark.
+    # Nudged apart in axes-fraction terms, which is resolution-independent unlike a data offset.
+    ax.annotate("throughput", (loads[-1], throughput[-1]), textcoords="offset points",
+                xytext=(8, -11), fontsize=9.5, color=BLUE, va="center")
+    tail.annotate("TTFT p95", (loads[-1], ttft_p95[-1]), textcoords="offset points",
+                  xytext=(8, 9), fontsize=9.5, color=ORANGE, va="center")
+    tail.annotate("p50", (loads[-1], ttft_p50[-1]), textcoords="offset points",
+                  xytext=(8, 0), fontsize=9, color=ORANGE, va="center", alpha=0.8)
 
     if first_sat is not None:
         # Boundary drawn midway between the last stable and first saturated cell -- the sweep
@@ -387,6 +393,10 @@ def plot_serving_tradeoff() -> Path:
 
     ax.set_ylim(0, max(throughput) * 1.25)
     tail.set_ylim(0, max(ttft_p95) * 1.25)
+    # Right-hand headroom for the end labels. Without it they are drawn past the axes and land on
+    # the twin axis's tick numbers, which is worse than no label at all.
+    span = loads[-1] - loads[0]
+    ax.set_xlim(loads[0] - span * 0.06, loads[-1] + span * 0.20)
     _style(ax)
     _label(
         ax,

@@ -242,9 +242,9 @@ keeps the 1.0× row and rejects the 2× one.)
 > compared.** The baseline reports decode rate with prefill excluded; this column is output tokens
 > over wall clock with prefill and queue *included*. On this workload prefill is **61% of a
 > request's service time and emits no output tokens at all** (3.78 s of a 6.19 s request), so the
-> end-to-end figure is roughly 4× below the decode rate by construction. Decode itself still runs
-> at **5.8–6.6 tok/s**, consistent with D24. Requests per minute is the honest throughput column
-> for a RAG workload this prefill-heavy.
+> end-to-end figure is roughly 4× below the decode rate by construction. Decode itself runs at
+> **6.6 tok/s served alone** and **2.91 tok/s under concurrent load**, consistent with D24.
+> Requests per minute is the honest throughput column for a RAG workload this prefill-heavy.
 
 **Sustained capacity is 11.5–12.1 requests/minute** — the drain rate of the saturated cells,
 reproduced in two independent sessions (a 5.7% spread, inside the ~7.5% cross-session band D24
@@ -262,16 +262,20 @@ choice of x-values as a measurement. Locating it properly means cells at 1.2× a
 **Chunked prefill: it works, and not on the metric it was built for.** Same offered load, same
 arrival seed, one variable:
 
-| chunked prefill | tok/s | mean in-flight | admission blocked | TTFT p95 | decode phase | e2e p50 |
-|---|---:|---:|---:|---:|---:|---:|
-| on (512) | 1.6 | 1.34 | 0 | **25.62 s** | **2.75 s** | **15.88 s** |
-| off (one pass) | 1.8 | 2.52 | 11 | **17.00 s** | **11.57 s** | **19.46 s** |
+| chunked prefill | tok/s | mean in-flight | admission blocked | TTFT p95 | decode phase p50 | decode rate p50 | e2e p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| on (512) | 1.6 | 1.34 | 0 | **25.62 s** | **2.06 s** | **2.91 tok/s** | **15.88 s** |
+| off (one pass) | 1.8 | 2.52 | 11 | **17.00 s** | **9.49 s** | **0.90 tok/s** | **19.46 s** |
 
 Chunking is **1.51× worse on p95 TTFT** and **1.23× better end to end**, because the two halves of
-a request move in opposite directions. Once admitted, a chunked request decodes at 5.8 tok/s — the
-single-request rate — while an unchunked one decodes at 1.4, because every unchunked 7,603-token
-prefill stalls every request already generating. **That 4.2× is head-of-line blocking, and
-preventing it is what the feature is for.**
+a request move in opposite directions. The two arms served identical token counts request for
+request, so this is a paired comparison: **chunking decodes faster on 12 of 12 requests, median
+ratio 3.02×** (range 1.81–6.43×). Every unchunked 7,603-token prefill stalls every request already
+generating, and **preventing that is what the feature is for.**
+
+Both arms are past saturation, so read this as a paired contrast under identical overload rather
+than as a latency figure for either. And chunking recovers most of the head-of-line loss without
+making concurrent decode free: 2.91 tok/s against the **6.6 tok/s** a request gets served alone.
 
 The TTFT cost is a *different* queue. `max_prefills_per_step=1` means the scheduler admits nobody
 new while one request occupies the prefill slot — and at 512 tokens a 7,603-token prompt occupies
