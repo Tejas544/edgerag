@@ -249,7 +249,7 @@ keeps the 1.0× row and rejects the 2× one.)
 **Sustained capacity is 11.5–12.1 requests/minute** — the drain rate of the saturated cells,
 reproduced in two independent sessions (a 5.7% spread, inside the ~7.5% cross-session band D24
 established). Against 9.4–9.7 req/min for strictly serial service, **continuous batching buys
-1.18–1.29×.** Throughput rises 2.29× for 3.53× the mean in-flight depth — sublinear, for the
+1.18–1.29×.** Throughput rises 2.25× for 3.87× the mean in-flight depth — sublinear, for the
 reason the baseline already gave: MHA decode is bandwidth-bound on KV reads, and a scheduler moves
 work around rather than moving bytes faster.
 

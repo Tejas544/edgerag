@@ -1337,8 +1337,10 @@ Comparing offered rate against *achieved* rate:
 | 4.0× | 12 | 0.647 | 0.188 | **3.44** | 1.33 | **saturated** |
 | 2.0× | **100** | 0.313 | 0.202 | **1.55** | 1.02 | **saturated** |
 
-Sustained capacity is **0.19–0.20 req/s = 11.4 req/min**, against 9.7 req/min for strictly serial
-service — so concurrency buys **1.18×** and saturation sits just past 1× offered load. The 2× and
+Sustained capacity is **0.19–0.20 req/s = 11.4 req/min** in this session, against 9.7 req/min for
+strictly serial service — so concurrency buys **1.18×** and saturation sits just past 1× offered
+load. (A second session reproduces it at 12.1 req/min; the two-session figure is
+**11.5–12.1 req/min at 1.18–1.29×** and is tabulated in the amendment below.) The 2× and
 4× rows were *both already past it*, and their tidy-looking TTFT numbers are an artifact of a
 12-request run ending before its queue did.
 
