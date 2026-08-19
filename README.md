@@ -216,12 +216,20 @@ session (`results/poisson_sweep.jsonl`, `CONTEXT.md` D25). Offered load is a mul
 **measured** single-request service rate — 6.19 s end to end, 3.78 s of it TTFT — so 1.0× is
 exactly break-even rather than an arbitrary requests/second figure.
 
-| offered load | tok/s aggregate | mean in-flight | TTFT p50 | TTFT p95 | e2e p50 |
-|---:|---:|---:|---:|---:|---:|
-| 0.5× | 0.7 | 0.38 | 3.92 s | 9.78 s | 6.00 s |
-| 1.0× | 1.3 | 0.81 | 5.30 s | 12.67 s | 9.69 s |
-| **2.0×** | **1.6** | 1.34 | 13.13 s | 25.62 s | 15.88 s |
-| 4.0× | 1.6 | 1.45 | 21.44 s | 43.10 s | 22.99 s |
+| offered load | req/min | tok/s end-to-end | mean in-flight | TTFT p50 | TTFT p95 | e2e p50 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.5× | 5.0 | 0.7 | 0.38 | 3.92 s | 9.78 s | 6.00 s |
+| 1.0× | 8.9 | 1.3 | 0.81 | 5.30 s | 12.67 s | 9.69 s |
+| **2.0×** | **11.6** | **1.6** | 1.34 | 13.13 s | 25.62 s | 15.88 s |
+| 4.0× | 11.3 | 1.6 | 1.45 | 21.44 s | 43.10 s | 22.99 s |
+
+> **`tok/s end-to-end` is not the baseline table's `tok/s per seq`, and the two must not be
+> compared.** The baseline reports decode rate with prefill excluded; this column is output tokens
+> over wall clock with prefill and queue *included*. On this workload prefill is **61% of a
+> request's service time and emits no output tokens at all** (3.78 s of a 6.19 s request), so the
+> end-to-end figure is roughly 4× below the decode rate by construction. Decode itself still runs
+> at **5.8–6.6 tok/s**, consistent with D24. Requests per minute is the honest throughput column
+> for a RAG workload this prefill-heavy.
 
 **The knee is at 2×.** Throughput rises 2.29× for 3.53× the mean in-flight depth — sublinear, and
 for the reason the baseline already gave: MHA decode is bandwidth-bound on KV reads, and a

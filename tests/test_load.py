@@ -438,7 +438,7 @@ def test_a_genuinely_overloaded_server_is_flagged_at_every_sample_size() -> None
 
 
 def test_the_expected_stable_rho_shrinks_as_the_run_lengthens() -> None:
-    """The correction is ``service * lambda / n``, so it must vanish in n rather than be a constant."""
+    """The correction is ``service * lambda / n``: it must vanish in n, not sit at a constant."""
     short, long = _cell(2.0, 12, 0.323, 11.6), _cell(2.0, 100, 0.323, 11.6)
     assert expected_stable_rho(short) > expected_stable_rho(long) > 1.0
     assert expected_stable_rho(short) == pytest.approx(1 + 6.39 * 0.323 / 12, rel=1e-9)

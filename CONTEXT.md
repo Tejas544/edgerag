@@ -1313,6 +1313,13 @@ Calibration, one request alone: **6.19 s end to end, 3.78 s TTFT, 2.41 s of deco
 | **2.0×** | 0.323 | **1.6** | 1.34 | 0 | 13.13 | 25.62 | 15.88 |
 | 4.0× | 0.647 | 1.6 | 1.45 | 0 | 21.44 | 43.10 | 22.99 |
 
+> **The `tok/s` column is end-to-end goodput and is not comparable to D14's per-sequence decode
+> rate.** Prefill is **61% of a request's service time** here (3.78 s of 6.19 s) and emits no
+> output tokens, so output-tokens-over-wall-clock sits ~4× under the decode rate by construction.
+> Decode itself runs at 5.8–6.6 tok/s, matching D24. Anyone reading 1.6 against D14's 26.0 and
+> concluding a 16× regression has compared two different quantities — which is why `req/min` is
+> reported beside it and why the README carries the same warning.
+
 **Finding 1 — the knee is at 2× offered load, and prediction 1 holds.** Throughput rises
 **2.29×** (0.7 → 1.6 tok/s) for **3.53×** the mean in-flight depth (0.38 → 1.34). Sublinear,
 exactly as D14's bandwidth argument requires: this checkpoint is MHA, decode is bound on KV reads

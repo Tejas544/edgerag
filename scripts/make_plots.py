@@ -30,6 +30,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
+from scripts.colab_poisson import is_saturated
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS = REPO_ROOT / "results"
 PLOTS = RESULTS / "plots"
@@ -345,6 +347,12 @@ def plot_serving_tradeoff() -> Path:
     ttft_p50 = [r["ttft_s"]["p50"] for r in chunked]
     ttft_p95 = [r["ttft_s"]["p95"] for r in chunked]
 
+    # Everything right of saturation is a latency that grows with how long the run was, not a
+    # property of the server (CONTEXT.md D25). Drawn as a shaded region rather than a caption,
+    # because the single most likely misreading of this figure is quoting a number from inside it.
+    saturated = [is_saturated(r) for r in chunked]
+    first_sat = next((i for i, s in enumerate(saturated) if s), None)
+
     fig, ax = plt.subplots(figsize=(9.0, 5.4), facecolor=SURFACE)
     tail = ax.twinx()
     tail.set_facecolor("none")
@@ -364,15 +372,17 @@ def plot_serving_tradeoff() -> Path:
     tail.text(loads[-1], ttft_p95[-1], "  TTFT p95", fontsize=9.5, color=ORANGE, va="center")
     tail.text(loads[-1], ttft_p50[-1], "  p50", fontsize=9, color=ORANGE, va="center", alpha=0.8)
 
-    peak = max(chunked, key=lambda r: r["output_tokens_per_s"])
-    if peak is not chunked[-1]:
-        ax.axvline(peak["load_factor"], color=LIMIT, linewidth=1.2, linestyle=(0, (2, 3)),
-                   zorder=2)
-        # Anchored under the curve rather than above it: when the peak is the leftmost point --
-        # which is what a server already saturated at 1x looks like -- a label at the top of the
-        # axes lands straight on the throughput series' own end label.
-        ax.text(peak["load_factor"], max(throughput) * 0.12,
-                f"  throughput peaks at {peak['load_factor']:g}x\n  and falls after it",
+    if first_sat is not None:
+        # Boundary drawn midway between the last stable and first saturated cell -- the sweep
+        # brackets saturation, it does not locate it, and a line drawn on a measured point would
+        # claim a precision the grid does not have.
+        edge = (loads[first_sat] + loads[first_sat - 1]) / 2 if first_sat else loads[0] * 0.9
+        ax.axvspan(edge, loads[-1] * 1.02, color=LIMIT, alpha=0.055, zorder=0, linewidth=0)
+        ax.axvline(edge, color=LIMIT, linewidth=1.2, linestyle=(0, (2, 3)), zorder=2)
+        ax.text(edge, max(throughput) * 0.10,
+                "  saturated: the queue grows for as\n"
+                "  long as the run lasts, so the latency\n"
+                "  here is a function of run length",
                 fontsize=8.5, color=LIMIT, va="bottom")
 
     ax.set_ylim(0, max(throughput) * 1.25)
@@ -380,7 +390,7 @@ def plot_serving_tradeoff() -> Path:
     _style(ax)
     _label(
         ax,
-        "Past saturation, offered load buys queue rather than work",
+        "The scheduler saturates at 1.2x, and the tail is unbounded past it",
         "Open-loop Poisson arrivals against the frozen trace. Offered load is a multiple\n"
         "of the measured single-request service rate, so 1.0x is exactly break-even.",
         xlabel="offered load (x single-request service rate)",
