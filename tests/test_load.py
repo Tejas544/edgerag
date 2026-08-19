@@ -28,6 +28,12 @@ from edgerag.cache.block_table import BlockTable
 from edgerag.sched.request import Request
 from edgerag.sched.scheduler import Batch, Scheduler, SchedulerConfig
 from edgerag.serve.engine import InferenceEngine, StepOutput
+from scripts.colab_poisson import (
+    decode_phase,
+    expected_stable_rho,
+    is_saturated,
+    utilisation,
+)
 
 EOS = 2
 
@@ -390,3 +396,86 @@ def test_out_of_blocks_is_an_allocator_error_not_a_driver_one() -> None:
     table = BlockTable(allocator=allocator)
     with pytest.raises(OutOfBlocksError):
         table.append(1000)
+
+
+# --- reading a sweep: saturation, and what it does to the latency columns -----------------------
+#
+# These guard the interpretation, not the mechanism. Phase 5e's most expensive mistake was
+# available for free: at 2x offered load the p99 TTFT reads 26.1 s over 12 requests and 221.7 s
+# over 100, because past saturation an open loop queues without bound and the percentile is a
+# function of run length. A sweep that does not classify its own cells hands that number to a
+# README with three decimal places (CONTEXT.md D25).
+
+
+def _cell(load: float, n: int, offered: float, completed_per_min: float, service_s: float = 6.39):
+    return {
+        "load_factor": load, "n_requests": n, "offered_per_s": offered,
+        "completed_per_s": completed_per_min / 60.0, "service_time_s": service_s,
+    }
+
+
+def test_a_keeping_up_server_is_not_called_saturated() -> None:
+    """The window-boundary bias makes a healthy small-n cell read above 1.0. It is not saturated.
+
+    Both rows are measured (D25): 0.5x came back at rho 0.97 and 1.0x at 1.09, and a flat
+    ``rho > 1.05`` rule would have condemned the second one and thrown away the only stable cell
+    with meaningful queueing in it.
+    """
+    for row in (_cell(0.5, 12, 0.081, 5.0), _cell(1.0, 12, 0.162, 8.9)):
+        assert not is_saturated(row), f"{row['load_factor']}x misread as saturated"
+
+
+def test_a_genuinely_overloaded_server_is_flagged_at_every_sample_size() -> None:
+    """2x is saturated whether it is measured over 12 requests or over 100.
+
+    The n=100 row is the one that matters: its rho is *closer* to 1 than the n=12 row's purely
+    because the boundary bias shrinks with n. A test that only ever saw small n could pass with a
+    rule that silently stops working on the longer run.
+    """
+    assert is_saturated(_cell(2.0, 12, 0.323, 11.6))
+    assert is_saturated(_cell(4.0, 12, 0.647, 11.3))
+    assert is_saturated(_cell(2.0, 100, 0.313, 12.1))
+
+
+def test_the_expected_stable_rho_shrinks_as_the_run_lengthens() -> None:
+    """The correction is ``service * lambda / n``, so it must vanish in n rather than be a constant."""
+    short, long = _cell(2.0, 12, 0.323, 11.6), _cell(2.0, 100, 0.323, 11.6)
+    assert expected_stable_rho(short) > expected_stable_rho(long) > 1.0
+    assert expected_stable_rho(short) == pytest.approx(1 + 6.39 * 0.323 / 12, rel=1e-9)
+
+
+def test_decode_phase_is_computed_per_request_not_from_the_medians() -> None:
+    """``p50(e2e) - p50(ttft)`` is a different number from ``p50(e2e - ttft)``.
+
+    Built so they disagree: TTFT and end-to-end are anti-correlated across these three requests,
+    which is what queueing does -- a request admitted late waits longer but then decodes against
+    an emptier machine. Taking the difference of medians would report 4.0; the truth is 8.0.
+    """
+    row = {"outcomes": [
+        {"ttft_s": 1.0, "e2e_s": 11.0, "error": None},
+        {"ttft_s": 5.0, "e2e_s": 13.0, "error": None},
+        {"ttft_s": 9.0, "e2e_s": 12.0, "error": None},
+    ]}
+    assert decode_phase(row)["p50"] == pytest.approx(8.0)
+
+
+def test_decode_phase_ignores_failed_and_unfinished_requests() -> None:
+    row = {"outcomes": [
+        {"ttft_s": 1.0, "e2e_s": 3.0, "error": None},
+        {"ttft_s": 1.0, "e2e_s": 99.0, "error": "boom"},
+        {"ttft_s": 1.0, "e2e_s": None, "error": None},
+    ]}
+    phase = decode_phase(row)
+    assert phase["n"] == 1
+    assert phase["p50"] == pytest.approx(2.0)
+
+
+def test_decode_phase_is_none_when_nothing_completed() -> None:
+    assert decode_phase({"outcomes": []}) is None
+
+
+def test_utilisation_of_a_stalled_cell_is_infinite_rather_than_a_crash() -> None:
+    """A cell that completed nothing must classify as saturated, not divide by zero."""
+    row = _cell(2.0, 12, 0.323, 0.0)
+    assert utilisation(row) == float("inf")
+    assert is_saturated(row)

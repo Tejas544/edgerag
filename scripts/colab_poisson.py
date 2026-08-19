@@ -23,6 +23,15 @@ discipline ``PLAN.md`` Phase 5 applied to the batching work):
    loop has no backpressure -- that is queueing theory, not a property of this code, and seeing it
    is a check that the driver is really open-loop.
 
+**Measured 2026-08-19 -- ``CONTEXT.md`` D25. Predictions 1 and 3 hold; prediction 2 is wrong.**
+Chunked prefill costs **1.51x on p95 TTFT** and buys **4.2x on the decode phase**, netting 1.23x
+end to end. The prediction had the mechanism right and the metric wrong: chunking protects
+*decode* from head-of-line blocking exactly as ``BUGS.md`` P-18 describes, and the TTFT it loses
+is admission queueing caused by ``max_prefills_per_step=1`` -- a 15-chunk prefill holds the single
+prefill slot for 15 iterations, during which nothing new is admitted. The predictions above are
+left exactly as they were written; editing them after the fact would destroy the only thing that
+makes recording them worth doing.
+
 **Two traps this script is shaped around, both of which produce a confident null result.**
 
 *The chunk-size knob is on the executor, not the scheduler.* ``SchedulerConfig.prefill_chunk_size``
@@ -53,7 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from bench.load import LoadResult, drain, replay_poisson
-from bench.metrics import MemoryProbe, assert_device_trusted
+from bench.metrics import MemoryProbe, Percentiles, assert_device_trusted
 from bench.serving import build_stack
 from edgerag.core.loader import HEADLINE_MODEL
 from edgerag.retrieval.trace import load_trace, trace_fingerprint
@@ -338,7 +347,9 @@ def main(argv: list[str] | None = None) -> int:
         # Arrival span at loads below 1x, service time above it -- whichever dominates. A 0.5x
         # cell is bounded by how slowly requests arrive; a 4x cell by how fast the GPU drains them.
         estimate = sum(args.n_requests * service_s / min(lf, 1.0) for lf, _ in plan)
-        print(f"\n{len(plan)} cells, roughly {estimate / 60:.0f}-{estimate * 2 / 60:.0f} min "
+        span = (f"{estimate:.0f}-{estimate * 2:.0f} s" if estimate < 120
+                else f"{estimate / 60:.0f}-{estimate * 2 / 60:.0f} min")
+        print(f"\n{len(plan)} cell(s), roughly {span} "
               f"(service time {service_s:.1f}s/request)\n")
 
         for load_factor, chunk_size in plan:
@@ -417,6 +428,67 @@ def main(argv: list[str] | None = None) -> int:
     return summarise(out_path)
 
 
+#: Tolerance above the analytically-expected stable rho before a cell is called saturated.
+SATURATION_MARGIN = 1.05
+
+
+def expected_stable_rho(row: dict[str, Any]) -> float:
+    """What ``utilisation`` reads on a cell that is keeping up perfectly. It is not 1.0.
+
+    ``completed_per_s`` divides by a window running from the first *submission* to the last
+    *completion*, so a server that keeps up exactly still shows a window one service time longer
+    than the arrival span: ``served = n / (n/lambda + service)``, hence
+    ``rho = 1 + service * lambda / n``.
+
+    That bias is large where it matters most -- 8.6% at n=12 and 2x load -- so a flat ``rho > 1.05``
+    threshold condemns a healthy cell at small n and clears a sick one at large n. Correcting it
+    analytically rather than widening the threshold is what lets the 1.0x cell be read as stable
+    (measured 1.09 against an expected 1.09) while the 2x cell at 1.67 is not.
+    """
+    return 1.0 + row["service_time_s"] * row["offered_per_s"] / max(1, row["n_requests"])
+
+
+def is_saturated(row: dict[str, Any]) -> bool:
+    return utilisation(row) > expected_stable_rho(row) * SATURATION_MARGIN
+
+
+def utilisation(row: dict[str, Any]) -> float:
+    """Offered rate over achieved rate. Above 1, the queue grows for as long as the run lasts.
+
+    **This is the number that decides whether a cell's latency percentiles mean anything.** An
+    open loop past saturation has no backpressure, so the k-th arrival waits roughly
+    ``k * (1/served - 1/offered)`` and TTFT grows *linearly in the number of requests offered*.
+    A p99 measured there is a property of how long the run was, not of the server -- and it is
+    reported with the same confident decimal places as a converged one.
+
+    Measured on this stack: at 2x offered load, n=12 gives p99 TTFT 26.1 s and n=100 gives 221.7 s.
+    Same code, same load, same session. Adding samples does not converge an unbounded quantity;
+    it walks further up the ramp.
+    """
+    served = row.get("completed_per_s", 0.0)
+    return row["offered_per_s"] / served if served > 0 else float("inf")
+
+
+def decode_phase(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Per-request ``e2e - ttft``, summarised. The generation half, with queueing removed.
+
+    Recomputed from the stored outcomes rather than taken as ``e2e p50 - ttft p50``, which is a
+    different quantity: the median of a difference is not the difference of medians unless the two
+    are perfectly rank-correlated, and under load they are not.
+
+    This decomposition is the reason chunked prefill is legible at all. TTFT is dominated by how
+    long a request waited to be *admitted*; the decode phase is how fast it ran once it was. Those
+    two respond to chunking in opposite directions, and a table that reports only their sum shows
+    a feature doing nothing.
+    """
+    phases = [
+        o["e2e_s"] - o["ttft_s"]
+        for o in row.get("outcomes", [])
+        if o.get("e2e_s") is not None and o.get("ttft_s") is not None and o.get("error") is None
+    ]
+    return Percentiles.of(phases).to_dict() if phases else None
+
+
 def summarise(out_path: Path) -> int:
     """Print the gate's two tables: the tradeoff curve, then the chunked-prefill comparison."""
     parsed = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()
@@ -431,26 +503,58 @@ def summarise(out_path: Path) -> int:
         print(f"  ({len(parsed) - len(rows)} superseded row(s); using the latest of each cell)")
 
     chunked = sorted([r for r in rows if r["chunked_prefill"]], key=lambda r: r["load_factor"])
-    print(f"\n{'offered':>10}{'req/s':>8}{'tok/s':>8}{'done':>7}{'in-flight':>11}"
-          f"{'TTFT p50':>10}{'p95':>8}{'p99':>8}{'e2e p50':>9}")
+    print(f"\n{'offered':>9}{'n':>5}{'req/s in':>9}{'out':>7}{'rho':>6}{'tok/s':>7}"
+          f"{'in-flight':>11}{'TTFT p50':>10}{'p95':>8}{'p99':>9}{'decode p50':>12}")
     for row in chunked:
-        ttft, e2e = row["ttft_s"], row["e2e_s"]
+        ttft, dec, rho = row["ttft_s"], decode_phase(row), utilisation(row)
         flag = "" if ttft and ttft["p99_is_reliable"] else "*"
-        print(f"{row['load_factor']:>9.1f}x{row['offered_per_s']:>8.3f}"
-              f"{row['output_tokens_per_s']:>8.1f}"
-              f"{row['n_completed']:>4}/{row['n_requests']:<2}"
-              f"{row['max_inflight']:>7} max{ttft['p50'] if ttft else 0:>10.2f}"
-              f"{ttft['p95'] if ttft else 0:>8.2f}{ttft['p99'] if ttft else 0:>7.2f}{flag}"
-              f"{e2e['p50'] if e2e else 0:>9.2f}")
+        mark = " SAT" if is_saturated(row) else ""
+        print(f"{row['load_factor']:>8.1f}x{row['n_requests']:>5}{row['offered_per_s']:>9.3f}"
+              f"{row['completed_per_s']:>7.3f}{rho:>6.2f}{row['output_tokens_per_s']:>7.1f}"
+              f"{row['mean_inflight']:>11.2f}{ttft['p50'] if ttft else 0:>10.2f}"
+              f"{ttft['p95'] if ttft else 0:>8.2f}{ttft['p99'] if ttft else 0:>8.2f}{flag}"
+              f"{dec['p50'] if dec else 0:>12.2f}{mark}")
+
+    # Capacity, and the line past which the latency columns above stop describing the server.
+    saturated = [r for r in chunked if is_saturated(r)]
+    stable = [r for r in chunked if not is_saturated(r)]
+    if saturated:
+        capacity = sum(r["completed_per_s"] for r in saturated) / len(saturated)
+        serial = 1.0 / chunked[0]["service_time_s"]
+        print(f"\n  Capacity {capacity:.3f} req/s = {capacity * 60:.1f} req/min, read off the "
+              f"drain rate of the {len(saturated)} saturated cell(s).")
+        print(f"  Strictly serial service would be {serial * 60:.1f} req/min, so concurrency buys "
+              f"{capacity / serial:.2f}x and saturation")
+        print(f"  sits near {capacity / serial:.2f}x offered load.")
+        print(f"\n  ** The {len(saturated)} row(s) marked SAT are past saturation. Their TTFT "
+              "columns are NOT server")
+        print("  properties -- an open loop with no backpressure queues without bound, so the k-th")
+        print("  arrival waits ~k x (1/served - 1/offered) and the percentiles grow linearly with")
+        print("  --n-requests. Quote latency from the unsaturated rows only; more samples do not")
+        print("  fix a saturated row, they walk further up the ramp.")
+        for row in saturated:
+            served, offered = row["completed_per_s"], row["offered_per_s"]
+            predicted = row["n_requests"] * (1 / served - 1 / offered)
+            actual = row["ttft_s"]["p99"] if row["ttft_s"] else 0.0
+            print(f"      {row['load_factor']:g}x n={row['n_requests']:<4} queueing predicts "
+                  f"{predicted:>6.0f}s at the tail, measured p99 {actual:>7.2f}s")
+    if stable:
+        best = stable[-1]
+        print(f"\n  Publishable latency comes from the unsaturated rows. At "
+              f"{best['load_factor']:g}x offered load:")
+        print(f"      TTFT p50 {best['ttft_s']['p50']:.2f}s, p95 {best['ttft_s']['p95']:.2f}s "
+              f"(n={best['n_requests']}), against {best['service_time_s']:.2f}s served alone.")
 
     if len(chunked) >= 2:
         base, top = chunked[0], chunked[-1]
         peak = max(chunked, key=lambda r: r["output_tokens_per_s"])
         gain = top["output_tokens_per_s"] / max(1e-9, base["output_tokens_per_s"])
-        conc = top["max_inflight"] / max(1, base["max_inflight"])
+        # Mean, not max. `max_inflight` saturates at the first cell that ever reached depth 2 and
+        # then reports "1x" for every increase after it -- which is how a 3.8x rise in actual
+        # concurrency gets printed as no change at all.
+        conc = top["mean_inflight"] / max(1e-9, base["mean_inflight"])
         print(f"\n  Offered load {base['load_factor']:g}x -> {top['load_factor']:g}x: throughput "
-              f"{gain:.2f}x at {conc:.0f}x the in-flight depth, TTFT p95 "
-              f"{top['ttft_s']['p95'] / max(1e-9, base['ttft_s']['p95']):.2f}x.")
+              f"{gain:.2f}x for {conc:.2f}x the mean in-flight depth.")
         if peak is not top:
             # Not a footnote: throughput peaking below maximum load means the server is past
             # saturation and the extra arrivals are buying queue, not work. Reporting the best
@@ -479,26 +583,41 @@ def summarise(out_path: Path) -> int:
         if not u["chunked_prefill"] and u["load_factor"] == c["load_factor"]
     ]
     if pairs:
-        print(f"\n{'chunked prefill':>20}{'tok/s':>9}{'TTFT p50':>10}{'p95':>8}{'p99':>8}"
-              f"{'e2e p50':>9}")
+        print(f"\n{'chunked prefill':>20}{'tok/s':>9}{'in-flight':>11}{'blocked':>9}"
+              f"{'TTFT p95':>10}{'decode p50':>12}{'e2e p50':>9}")
         for on, off in pairs:
             for label, row in ((f"on ({on['chunk_size']})", on), ("off (one pass)", off)):
-                ttft, e2e = row["ttft_s"], row["e2e_s"]
+                ttft, e2e, dec = row["ttft_s"], row["e2e_s"], decode_phase(row)
                 print(f"{label:>20}{row['output_tokens_per_s']:>9.1f}"
-                      f"{ttft['p50'] if ttft else 0:>10.2f}{ttft['p95'] if ttft else 0:>8.2f}"
-                      f"{ttft['p99'] if ttft else 0:>8.2f}{e2e['p50'] if e2e else 0:>9.2f}")
-            if on["ttft_s"] and off["ttft_s"]:
-                ratio = off["ttft_s"]["p95"] / on["ttft_s"]["p95"]
-                print(f"\n  Unchunked p95 TTFT is {ratio:.2f}x the chunked one at "
-                      f"{on['load_factor']:g}x load. This is the number D18 and BUGS.md P-18 were")
-                print("  written to predict, and the first time the feature has been priced.")
+                      f"{row['mean_inflight']:>11.2f}"
+                      f"{row['scheduler_delta']['admission_blocked']:>9}"
+                      f"{ttft['p95'] if ttft else 0:>10.2f}{dec['p50'] if dec else 0:>12.2f}"
+                      f"{e2e['p50'] if e2e else 0:>9.2f}")
+
+            on_dec, off_dec = decode_phase(on), decode_phase(off)
+            if not (on["ttft_s"] and off["ttft_s"] and on_dec and off_dec):
+                continue
+            # Reported as two separate ratios in whichever direction they fall, because the
+            # feature moves TTFT and decode *opposite* ways and a single "chunking wins/loses"
+            # number is the average of a saving and a cost.
+            ttft_ratio = on["ttft_s"]["p95"] / off["ttft_s"]["p95"]
+            dec_ratio = off_dec["p50"] / on_dec["p50"]
+            e2e_ratio = on["e2e_s"]["p50"] / off["e2e_s"]["p50"]
+            print(f"\n  At {on['load_factor']:g}x load, chunking costs {ttft_ratio:.2f}x on p95 "
+                  f"TTFT and buys {dec_ratio:.2f}x on the decode phase,")
+            print(f"  netting {e2e_ratio:.2f}x end to end. The two halves move in opposite "
+                  "directions and only the")
+            print("  decomposition shows it -- TTFT is mostly *admission* queueing, decode is what")
+            print("  BUGS.md P-18 is actually about. Mean in-flight and the admission-blocked")
+            print("  count say which resource each arm ran out of.")
 
     thin = [r for r in rows if r["ttft_s"] and not r["ttft_s"]["p99_is_reliable"]]
     if thin:
-        print(f"\n  `*` p99 from under 100 samples ({len(thin)}/{len(rows)} cells) -- it is")
-        print("  the max, not a percentile. A publishable p99 needs --n-requests 100, which costs")
-        print("  roughly an hour per cell at this service time. Say 'p95 over n=12' in the README")
-        print("  rather than quoting a p99 the sample cannot support.")
+        print(f"\n  `*` p99 from under 100 samples ({len(thin)}/{len(rows)} cells) -- it is the")
+        print("  max, not a percentile. Raising --n-requests fixes that **only on an unsaturated")
+        print("  row**. On a saturated one the sample size was never the problem: the quantity")
+        print("  itself diverges with run length, so a bigger n buys a bigger number, not a")
+        print("  better estimate. Lower the offered load instead.")
 
     sessions = {row.get("session_id", "unstamped") for row in rows}
     versions = {row.get("code_version", "unknown") for row in rows}

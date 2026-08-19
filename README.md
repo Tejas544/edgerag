@@ -7,10 +7,11 @@ No LangChain. No LlamaIndex. No `model.generate()`. The paged KV-cache allocator
 continuous-batching scheduler, the visual-token compressor, and the quantized linear layers are
 written here, not imported.
 
-> **Status: Phase 7 of 8 (Aug 19, 2026).** The decoder, paged KV cache, scheduler, visual-token
+> **Status: Phase 8 of 8 (Aug 19, 2026).** The decoder, paged KV cache, scheduler, visual-token
 > compressor, INT4 quantization, hybrid retrieval and the streaming server are built and measured
 > — `/v1/chat/completions` answers a document question from retrieved pages on the 2.2B model, at
-> 2.30 GiB of weights. Phase 8 is the final write-up. Every number below is measured or exactly
+> 2.30 GiB of weights, and the scheduler has now been put
+> [under Poisson load](#the-serving-layer-under-load). Every number below is measured or exactly
 > computed, with its source file named; what is still unmeasured is listed under
 > [Known limitations](#known-limitations) rather than left blank. See [`PLAN.md`](PLAN.md) for
 > the phase schedule.
@@ -116,7 +117,9 @@ Two things this table is saying that are easy to misread:
   heads, 32 KV heads), so decode is bandwidth-bound on KV reads at 192 KiB/token. Scheduling
   cannot recover that — only cutting KV bytes can.
 - **TTFT degrades superlinearly** (1× → 2.97× → 6.7×), because left-padding pads every request to
-  the batch maximum. This is what chunked prefill has to fix.
+  the batch maximum. Chunked prefill was built to fix this, and
+  [the measurement says it fixes something else](#the-serving-layer-under-load) — the decode
+  phase, 4.2×, while making TTFT *worse*.
 
 **KV cache on/off** at batch 1: 25.95 tok/s vs **0.26 tok/s — 100×**, against the 2–3× a
 short-prompt workload would show. Without a cache each decode step re-attends the whole
@@ -206,6 +209,54 @@ path** at the median request length — 23.5 ms per decode step against 8.8 ms o
 head-major pool layout took ~20% off that and did not change the conclusion: the fused kernel is
 required, not optional, and it is not written.
 
+### The serving layer under load
+
+Open-loop Poisson arrivals against the frozen trace, 12 requests per point, `LM8+ViT4`, one T4
+session (`results/poisson_sweep.jsonl`, `CONTEXT.md` D25). Offered load is a multiple of the
+**measured** single-request service rate — 6.19 s end to end, 3.78 s of it TTFT — so 1.0× is
+exactly break-even rather than an arbitrary requests/second figure.
+
+| offered load | tok/s aggregate | mean in-flight | TTFT p50 | TTFT p95 | e2e p50 |
+|---:|---:|---:|---:|---:|---:|
+| 0.5× | 0.7 | 0.38 | 3.92 s | 9.78 s | 6.00 s |
+| 1.0× | 1.3 | 0.81 | 5.30 s | 12.67 s | 9.69 s |
+| **2.0×** | **1.6** | 1.34 | 13.13 s | 25.62 s | 15.88 s |
+| 4.0× | 1.6 | 1.45 | 21.44 s | 43.10 s | 22.99 s |
+
+**The knee is at 2×.** Throughput rises 2.29× for 3.53× the mean in-flight depth — sublinear, and
+for the reason the baseline already gave: MHA decode is bandwidth-bound on KV reads, and a
+scheduler moves work around rather than moving bytes faster. Past 2× the throughput column is flat
+while p95 TTFT nearly doubles. That is what saturation looks like with no backpressure, and it is
+the reason this project reports the tradeoff curve rather than a throughput multiple.
+
+**Chunked prefill: it works, and not on the metric it was built for.** Same offered load, same
+arrival seed, one variable:
+
+| chunked prefill | tok/s | mean in-flight | admission blocked | TTFT p95 | decode phase | e2e p50 |
+|---|---:|---:|---:|---:|---:|---:|
+| on (512) | 1.6 | 1.34 | 0 | **25.62 s** | **2.75 s** | **15.88 s** |
+| off (one pass) | 1.8 | 2.52 | 11 | **17.00 s** | **11.57 s** | **19.46 s** |
+
+Chunking is **1.51× worse on p95 TTFT** and **1.23× better end to end**, because the two halves of
+a request move in opposite directions. Once admitted, a chunked request decodes at 5.8 tok/s — the
+single-request rate — while an unchunked one decodes at 1.4, because every unchunked 7,603-token
+prefill stalls every request already generating. **That 4.2× is head-of-line blocking, and
+preventing it is what the feature is for.**
+
+The TTFT cost is a *different* queue. `max_prefills_per_step=1` means the scheduler admits nobody
+new while one request occupies the prefill slot — and at 512 tokens a 7,603-token prompt occupies
+it for 15 iterations instead of one. Mean in-flight 1.34 against 2.52, and `admission_blocked` 0
+against 11, say it directly: the chunked arm was rate-limited by the prefill slot long before it
+was limited by memory. The controlled test is one cell at `--max-prefills-per-step 4` and it has
+not been run.
+
+**Read the whole table knowing the pool is 5.25 GiB.** A median request needs 478 blocks, so the
+shipped 640-block pool admits **exactly one** — at 4 GiB no queue forms inside the scheduler and
+neither arm above can differ from the other. Concurrency at the budget is capped by the budget,
+not by the scheduler, and saying so requires having measured the scheduler somewhere it had room.
+Pool conservation held on all five cells, which is the first check of the allocator's invariants
+against the real executor rather than a fake one.
+
 ### Visual token pruning: the price, not just the saving
 
 ![ANLS against KV reclaimed, both strategies](results/plots/pruning_curve.png)
@@ -279,6 +330,18 @@ and the predicted failure modes this design is built to avoid.
   has no Windows support, so this is Colab-only work that has not been scheduled.
 - **The pruning quality curve is n=40.** Standard error ~0.06; most gaps in that table are ties.
   More queries, not more ratios, is where the next hour of T4 time should go.
+- **Every serving p99 is n=12, so it is the worst single request wearing a percentile's name.**
+  p95 is the honest tail at that sample size and is what the tables above quote. A real p99 needs
+  100 requests per cell, roughly an hour of T4 time each.
+- **Serving TTFT excludes retrieval and the vision tower**, which run once per request on the
+  caller's thread and are built before the timed window so that a constant does not mask the
+  queueing being measured. They cost **3.94 s per prompt**, measured — so a user's first token at
+  idle arrives at roughly 7.7 s, not the 3.78 s the scheduler sees.
+- **Chunked prefill's TTFT penalty is explained but not controlled.** The prefill-slot starvation
+  account (D25 finding 3) fits the in-flight depth and the admission-blocked counts and nothing
+  else I can construct, but the controlled test — one cell at `--max-prefills-per-step 4` — has not
+  been run. It is about three minutes of T4 time and it is the next thing this project should
+  spend them on.
 - **Retrieval scores text only, because the image half measured out to noise.** Projecting the
   query through `embed_tokens` into the vision tower's output space gives a similarity spread 0.14×
   the text side's, with a mean per-query maximum indistinguishable from zero — so `alpha` defaults

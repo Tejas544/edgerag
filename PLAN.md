@@ -228,7 +228,14 @@ Splits the same way Phase 4 did: **logic and correctness are local, every number
 **Cut line if time runs short:** 5e's Poisson harness before 5c's chunked prefill. A correct
 scheduler with a measured TTFT problem is a better result than an unmeasured scheduler.
 
-> **5e was cut, and is now built and awaiting one T4 session.** The cut was taken as written —
+> **5e is measured — `CONTEXT.md` D25, 2026-08-19.** Saturation knee at 2× offered load;
+> throughput 2.29× for 3.53× mean in-flight, then flat while p95 TTFT keeps climbing. The
+> prediction that chunked prefill would win TTFT is **wrong**: it costs 1.51× on p95 TTFT and buys
+> 4.2× on the decode phase, netting 1.23× end to end. The phase's own instruction — record the
+> predictions first so the result can disagree — is the only reason that reads as a finding rather
+> than as a feature quietly not working.
+>
+> **5e was cut, and was then built and run.** The cut was taken as written —
 > 5c shipped, 5e did not — which left the scheduler correct and entirely unmeasured, and left the
 > throughput/p99 half of `01_EDGERAG.md` §6 blank. The driver is `bench/load.py` (open-loop
 > Poisson, model-agnostic, 15 tests against a fake executor), the runner is

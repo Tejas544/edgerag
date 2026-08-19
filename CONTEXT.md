@@ -1296,6 +1296,100 @@ re-measuring — weights are exact and confirmed, and quality is stable.
 
 ---
 
+## D25 · Phase 5e measured: the scheduler saturates at 2×, and chunked prefill trades TTFT for decode · **MEASURED** · 2026-08-19
+
+The gate cut on Aug 16 and never re-run. Tesla T4, `LM8+ViT4`, single session `110a8619e553`,
+trace `94b148a0b9f5006e`, 12 requests per cell, 8 distinct prompts (5,638–7,610 tokens, median
+7,603) cycled, `max_new_tokens=32` with EOS reached at 16. Pool **1792 blocks × 16 tokens =
+5.25 GiB**, deliberately over budget — see finding 5.
+
+Calibration, one request alone: **6.19 s end to end, 3.78 s TTFT, 2.41 s of decode for 16 tokens
+= 6.6 tok/s.** Consistent with D24's 5.58 tok/s on a shorter prompt.
+
+| offered load | req/s | tok/s | mean in-flight | admission blocked | TTFT p50 | TTFT p95 | e2e p50 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.5× | 0.081 | 0.7 | 0.38 | 0 | 3.92 | 9.78 | 6.00 |
+| 1.0× | 0.162 | 1.3 | 0.81 | 0 | 5.30 | 12.67 | 9.69 |
+| **2.0×** | 0.323 | **1.6** | 1.34 | 0 | 13.13 | 25.62 | 15.88 |
+| 4.0× | 0.647 | 1.6 | 1.45 | 0 | 21.44 | 43.10 | 22.99 |
+
+**Finding 1 — the knee is at 2× offered load, and prediction 1 holds.** Throughput rises
+**2.29×** (0.7 → 1.6 tok/s) for **3.53×** the mean in-flight depth (0.38 → 1.34). Sublinear,
+exactly as D14's bandwidth argument requires: this checkpoint is MHA, decode is bound on KV reads
+at 192 KiB/token, and a scheduler cannot move bytes faster than the card moves them. Past 2× the
+throughput column is **flat** (1.6 → 1.6) while p95 TTFT nearly doubles (25.62 → 43.10 s).
+Prediction 3 holds too — an open loop has no backpressure, so beyond saturation offered load buys
+queue and nothing else.
+
+**Finding 2 — prediction 2 is falsified on TTFT, and the decomposition is what rescues it.**
+Same offered load, same arrival seed, one variable:
+
+| chunked prefill | tok/s | mean in-flight | admission blocked | TTFT p50 | TTFT p95 | e2e p50 |
+|---|---:|---:|---:|---:|---:|---:|
+| **on (512)** | 1.6 | 1.34 | 0 | 13.13 | **25.62** | **15.88** |
+| off (one pass) | 1.8 | 2.52 | 11 | 7.89 | **17.00** | **19.46** |
+
+Chunking is **1.51× worse on p95 TTFT** — the opposite of the prediction — and **1.23× better end
+to end**. Both are true because TTFT and the decode phase move in opposite directions and their
+sum hides it. Splitting end-to-end into *waiting to be admitted* and *generating once admitted*:
+
+| arm | TTFT p50 | decode phase | tok/s while decoding |
+|---|---:|---:|---:|
+| chunked (512) | 13.13 s | **2.75 s** | 5.8 |
+| unchunked | 7.89 s | **11.57 s** | 1.4 |
+
+The chunked arm's decode runs at 5.8 tok/s — the single-request rate. The unchunked arm's runs at
+1.4, **4.2× slower**. That is `BUGS.md` P-18 happening: an unchunked 7,603-token prefill occupies
+one whole iteration, and every request already decoding stalls for the length of it. **Chunked
+prefill does exactly the job it was built for.** What it does not do is help TTFT.
+
+> These decode figures are `e2e p50 − TTFT p50`, which is not `p50(e2e − TTFT)` unless the two are
+> perfectly rank-correlated. They are indicative of a 4× effect, not exact. `summarise()` now
+> computes the per-request version from the stored outcomes; the exact numbers land when the JSONL
+> is committed.
+
+**Finding 3 — the TTFT regression is admission queueing, and `max_prefills_per_step=1` is the
+cause.** `Scheduler.schedule()` admits a waiting request only while
+`len(batch.prefill) < max_prefills_per_step`. At 512 tokens a 7,603-token prompt is **15 chunks**,
+so a chunked request holds the single prefill slot for 15 iterations and *nothing new is admitted
+for the whole of it*. Unchunked, the slot frees after one iteration and the next request starts
+immediately. The two counters say so directly: mean in-flight **1.34 vs 2.52**, and
+`admission_blocked` **0 vs 11** — the unchunked arm reached real block pressure, the chunked arm
+never came close, because it was rate-limited by the prefill slot long before it was limited by
+memory. Chunking did not make prefill slower; it made the scheduler admit 15× less often.
+
+**This revises how the README describes the feature.** Chunked prefill has been called "the fix
+for D14's 25 s TTFT at batch 4". As wired it is not: it fixes *decode stalling* and costs TTFT.
+The claim it can support is the one that was measured — 4.2× on the decode phase, 1.23× end to
+end, at 1.51× on p95 TTFT.
+
+**Finding 4 — pool conservation held on all five cells**, blocks free before == free after. The
+allocator's invariants have been property-tested since Phase 3a and had never been checked against
+the real executor under concurrent traffic. They hold.
+
+**Finding 5 — every number above describes a configuration that does not fit the budget, and that
+is the point.** A median request needs **478 blocks**; the shipped 640-block pool therefore admits
+**exactly one**. At the ship configuration no queue forms inside the scheduler at all, so neither
+arm of finding 2 can differ from the other and the whole tradeoff collapses to a flat line.
+**Concurrency at 4 GiB is capped by the budget, not by the scheduler** — which is only sayable
+because the scheduler was measured somewhere it had room.
+
+**Open, and one of them is cheap:**
+
+- **The finding-3 mechanism is inferred, not controlled.** In-flight depth and the
+  admission-blocked count are consistent with prefill-slot starvation and with nothing else I can
+  think of, but the controlled version is one cell: chunked at `--max-prefills-per-step 4`. If the
+  TTFT penalty disappears, confirmed; if it does not, finding 3 is wrong and the cause is
+  elsewhere. ~3 minutes of T4.
+- **Every p99 here is n=12**, which makes it the worst single request wearing a percentile's name.
+  p95 is the honest tail at this sample size. A real p99 needs `--n-requests 100`, ~1 hour per cell.
+- **TTFT excludes retrieval and the vision tower**, which are built before the timed window
+  (measured separately at **3.94 s per prompt**). A user's first token at idle arrives at roughly
+  3.78 + 3.94 = **7.7 s**, and that is the number to quote end-to-end rather than the 3.78 s the
+  scheduler sees.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |

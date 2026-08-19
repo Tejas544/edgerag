@@ -287,6 +287,24 @@ would not.
 
 Resumable per cell, fsync'd per cell. A disconnect costs one cell.
 
+> ✅ **Measured 2026-08-19 — `CONTEXT.md` D25.** The knee is at **2× offered load**: throughput
+> rises 2.29× for 3.53× the mean in-flight depth and then goes flat while p95 TTFT keeps climbing.
+> Predictions 1 and 3 hold. **Prediction 2 is falsified** — chunked prefill is 1.51× *worse* on
+> p95 TTFT — and the decomposition is what rescues it: once admitted, a chunked request decodes at
+> 5.8 tok/s against an unchunked one's 1.4, so chunking buys **4.2× on the decode phase** and
+> 1.23× end to end. The TTFT cost is a different queue entirely — `max_prefills_per_step=1` means
+> a 15-chunk prefill holds the only prefill slot for 15 iterations and nothing new is admitted.
+> **The controlled test for that is one cell and has not been run:**
+>
+> ```python
+> !python -m scripts.colab_poisson --drive /content/drive/MyDrive/edgerag \
+>     --out-name poisson_prefill_slots.jsonl --load-factors 2.0 \
+>     --max-prefills-per-step 4 --skip-chunk-comparison
+> ```
+>
+> If the p95 TTFT penalty disappears, the mechanism is confirmed. If it does not, D25 finding 3 is
+> wrong and the cause is somewhere else. ~3 min.
+
 **If you have quota for one more thing, make it this** — a real tail at the interesting load:
 
 ```python
