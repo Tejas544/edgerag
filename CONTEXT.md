@@ -1370,6 +1370,12 @@ for D14's 25 s TTFT at batch 4". As wired it is not: it fixes *decode stalling* 
 The claim it can support is the one that was measured — 4.2× on the decode phase, 1.23× end to
 end, at 1.51× on p95 TTFT.
 
+> The unchunked arm reached an in-flight depth of **4** against a `concurrency_supported` of 3.
+> Not a contradiction: that figure is computed at the *median* prompt length (7,603 tokens →
+> 478 blocks), and the trace's prompts run 5,638–7,610, so a batch that happens to draw short ones
+> fits four. Admission budgets each request individually; the printed figure is a planning number
+> for the median, not a ceiling.
+
 **Finding 4 — pool conservation held on all five cells**, blocks free before == free after. The
 allocator's invariants have been property-tested since Phase 3a and had never been checked against
 the real executor under concurrent traffic. They hold.
