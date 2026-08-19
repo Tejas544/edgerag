@@ -11,7 +11,8 @@ written here, not imported.
 > compressor, INT4 quantization, hybrid retrieval and the streaming server are built and measured
 > — `/v1/chat/completions` answers a document question from retrieved pages on the 2.2B model, at
 > 2.30 GiB of weights, and the scheduler has now been put
-> [under Poisson load](#the-serving-layer-under-load). Every number below is measured or exactly
+> [under Poisson load](#under-load-what-the-scheduler-is-actually-worth) — sustained capacity
+> **11.5–12.1 req/min**. Every number below is measured or exactly
 > computed, with its source file named; what is still unmeasured is listed under
 > [Known limitations](#known-limitations) rather than left blank. See [`PLAN.md`](PLAN.md) for
 > the phase schedule.
@@ -265,6 +266,61 @@ not by the scheduler, and saying so requires having measured the scheduler somew
 Pool conservation held on all five cells, which is the first check of the allocator's invariants
 against the real executor rather than a fake one.
 
+### Under load: what the scheduler is actually worth
+
+![Throughput and tail TTFT against offered load](results/plots/serving_tradeoff.png)
+
+Open-loop Poisson arrivals against the frozen trace, `LM8+ViT4`, one T4 session
+(`results/poisson_sweep.jsonl`, `CONTEXT.md` D25). Offered load is a multiple of the *measured*
+single-request service rate, so it self-calibrates across arms.
+
+| offered | ρ | state | tok/s | mean in-flight | TTFT p50 | TTFT p95 |
+|---|---:|---|---:|---:|---:|---:|
+| 0.5× | 0.97 | stable | 0.7 | 0.38 | **3.92 s** | **9.78 s** |
+| 1.0× | 1.09 | stable | 1.3 | 0.81 | **5.30 s** | **12.67 s** |
+| 2.0× | 1.67 | saturated | 1.6 | 1.34 | 13.13 s | 25.62 s |
+| 4.0× | 3.44 | saturated | 1.6 | 1.45 | 21.44 s | 43.10 s |
+
+**Sustained capacity is 11.5–12.1 requests/minute**, measured as the drain rate of the saturated
+cells and reproduced in two independent sessions (a 5.7% spread, inside the ~7.5% cross-session
+band D24 established). Against 9.4–9.7 req/min for strictly serial service, **continuous batching
+buys 1.18–1.29×** — sublinear in concurrency, exactly as D14's argument requires: this checkpoint
+is MHA, decode is bound on KV reads at 192 KiB/token, and no scheduler moves bytes faster.
+
+**The two saturated rows are not latency measurements, and the sweep says so in code.** Past
+saturation an open loop has no steady state: the k-th arrival waits about
+`k × (1/served − 1/offered)`, so every percentile grows linearly with how long the run was. Run at
+2× offered load with n=12 the p99 TTFT is 26.1 s; with **n=100 it is 221.7 s** — same code, same
+load, 8.5× apart. Queueing predicts all three saturated cells from the drain rate alone (25 s vs
+26.1, 45 s vs 44.7, 176 s vs 221.7). **More samples do not fix a divergent quantity**, which is
+the opposite of the reason the n=100 cell was run.
+
+**Chunked prefill does its job, and its job is not TTFT.** Same load, same arrival seed, one
+variable:
+
+| chunked prefill | tok/s | mean in-flight | TTFT p95 | decode phase | tok/s decoding | e2e p50 |
+|---|---:|---:|---:|---:|---:|---:|
+| on (512) | 1.6 | 1.34 | 25.62 s | **2.75 s** | 5.8 | **15.88 s** |
+| off (one pass) | 1.8 | 2.52 | **17.00 s** | 11.57 s | 1.4 | 19.46 s |
+
+Splitting end-to-end into *waiting for admission* and *generating once admitted* is what makes the
+feature legible: chunking runs decode at the full single-request rate while an unchunked prefill
+stalls every in-flight request for the length of one 7,603-token forward pass — **4.2× slower
+decode**, which is `BUGS.md` P-18 happening. It pays for that with 1.51× on p95 TTFT, because
+`max_prefills_per_step=1` means a 15-chunk prefill holds the only prefill slot for 15 iterations
+and nothing new is admitted meanwhile. Net: **1.23× better end to end.** The earlier description of
+chunked prefill as "the fix for TTFT" was wrong, and this is what it is actually for.
+
+**Every row above is over budget on purpose.** A median request needs 478 blocks, so the shipped
+640-block pool admits **exactly one** — at the ship configuration no queue forms in the scheduler
+at all and the whole tradeoff is a flat line. Concurrency at 4 GiB is capped by the budget, not by
+the scheduler, and that is only sayable because the scheduler was measured somewhere it had room.
+
+> **`tok/s` here is end-to-end goodput and is not comparable to the 26.0 in the baseline table.**
+> Prefill is 61% of a request's service time and emits no output tokens, so output-over-wall-clock
+> sits ~4× under the decode rate by construction. Decode itself runs at 5.8–6.6 tok/s, matching
+> D24. Requests per minute is the honest throughput figure for a RAG workload.
+
 ### Visual token pruning: the price, not just the saving
 
 ![ANLS against KV reclaimed, both strategies](results/plots/pruning_curve.png)
@@ -319,6 +375,26 @@ is logged in [`CONTEXT.md`](CONTEXT.md).
 Populated as they are discovered rather than at the end. [`BUGS.md`](BUGS.md) carries the bug log
 and the predicted failure modes this design is built to avoid.
 
+- **No p99 TTFT is quoted anywhere, and that is deliberate.** At the sample sizes a T4 session
+  affords, the unsaturated cells have n=12 — a p99 there is the worst single request wearing a
+  percentile's name. Raising n only helps on an unsaturated cell; on a saturated one the quantity
+  itself diverges with run length (D25). p95 over n=12 is what the data supports.
+- **The load sweep's concurrency comes from an over-budget pool.** 1792 blocks is 5.25 GiB against
+  a 4 GiB budget. It is the only way to measure the scheduler at all — the ship pool admits one
+  request — but it means the throughput and latency curves describe a machine with more memory
+  than the one the project claims to fit.
+- **`max_prefills_per_step=1` is the binding constraint under load, not the block pool.**
+  `admission_blocked` is 0 in every chunked cell: the scheduler was rate-limited by the single
+  prefill slot long before it ran short of blocks. The mechanism is inferred from in-flight depth
+  and that counter rather than controlled; the control is one ~3-minute cell at
+  `--max-prefills-per-step 4` and it has not been run.
+- **The chunked-prefill comparison was run inside the saturated region.** Both arms shared an
+  offered load, an arrival seed and a request count, so the ratios are internally controlled — but
+  the absolute seconds are run-length dependent like everything else at 2× load. Re-running both
+  arms at 1.0× would make the numbers quotable as latencies rather than only as a ratio.
+- **Serving TTFT excludes retrieval and the vision tower.** Both are built before the timed window,
+  because neither varies with concurrency. They cost 3.94 s per request, so a user's first token at
+  idle arrives near **7.7 s**, not the 3.78 s the scheduler sees.
 - **INT4 is 4× slower than fp16, as predicted, and the fix is unbuilt.** Measured: 3.3–3.8 tok/s
   against fp16's 13.9. `QuantLinear` dequantizes then calls a normal matmul, and a T4 has no INT4
   tensor cores, so the packed bytes are expanded before they reach the multiplier. The memory win

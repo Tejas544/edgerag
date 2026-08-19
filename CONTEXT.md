@@ -1296,7 +1296,7 @@ re-measuring — weights are exact and confirmed, and quality is stable.
 
 ---
 
-## D25 · Phase 5e measured: the scheduler saturates at 2×, and chunked prefill trades TTFT for decode · **MEASURED** · 2026-08-19
+## D25 · Phase 5e measured: capacity is ~12 req/min, and chunked prefill trades TTFT for decode · **MEASURED, AMENDED** · 2026-08-19
 
 The gate cut on Aug 16 and never re-run. Tesla T4, `LM8+ViT4`, single session `110a8619e553`,
 trace `94b148a0b9f5006e`, 12 requests per cell, 8 distinct prompts (5,638–7,610 tokens, median
@@ -1394,12 +1394,83 @@ because the scheduler was measured somewhere it had room.
   think of, but the controlled version is one cell: chunked at `--max-prefills-per-step 4`. If the
   TTFT penalty disappears, confirmed; if it does not, finding 3 is wrong and the cause is
   elsewhere. ~3 minutes of T4.
-- **Every p99 here is n=12**, which makes it the worst single request wearing a percentile's name.
-  p95 is the honest tail at this sample size. A real p99 needs `--n-requests 100`, ~1 hour per cell.
+- ~~**Every p99 here is n=12**, which makes it the worst single request wearing a percentile's
+  name. p95 is the honest tail at this sample size. A real p99 needs `--n-requests 100`, ~1 hour
+  per cell.~~ **Run, and it refuted its own premise — see the amendment below.**
 - **TTFT excludes retrieval and the vision tower**, which are built before the timed window
   (measured separately at **3.94 s per prompt**). A user's first token at idle arrives at roughly
   3.78 + 3.94 = **7.7 s**, and that is the number to quote end-to-end rather than the 3.78 s the
   scheduler sees.
+
+> ### ⚠️ Amended 2026-08-19 — the n=100 run was meant to fix the p99 and instead showed the p99 is not a number
+>
+> Session `26784d2db5b2`, one cell, 2× offered load, 100 requests, ~9 minutes. The intent was to
+> replace the `*`-flagged n=12 tail with a real percentile. It produced this:
+>
+> | | n | TTFT p50 | p95 | p99 |
+> |---|---:|---:|---:|---:|
+> | 2× offered load | 12 | 13.13 | 25.62 | 26.12 |
+> | 2× offered load | **100** | **119.97** | **203.00** | **221.74** |
+>
+> **Same offered load, same code, same arm. The p99 moved by 8.5×.** Not noise, and not a session
+> effect — it is the sample size, and that is the whole finding: *at 2× offered load this server is
+> past saturation, and an open loop past saturation has no steady state to sample.* The k-th
+> arrival waits about `k × (1/served − 1/offered)`, so every latency percentile grows **linearly
+> with how long the run was**. Adding samples does not converge the estimate; it walks further up
+> a ramp.
+>
+> The arithmetic predicts all four saturated cells from the drain rate alone:
+>
+> | cell | n | ρ = offered/served | queueing predicts | measured p99 |
+> |---|---:|---:|---:|---:|
+> | 2× | 12 | 1.67 | 25 s | 26.12 s |
+> | 4× | 12 | 3.44 | 45 s | 44.71 s |
+> | 2× | 100 | 1.55 | 176 s | 221.74 s |
+>
+> That agreement is also the check on the driver that prediction 3 was really asking for: the
+> arrival process is genuinely open-loop, because a closed loop cannot produce this.
+>
+> **So the title of this entry is wrong and the table above needs reading with care.** Saturation
+> is not at 2×; 2× is the first measured point *past* it. Capacity is the drain rate of the
+> saturated cells:
+>
+> | session | service alone | capacity | concurrency buys | saturation at |
+> |---|---:|---:|---:|---:|
+> | `110a8619e553` (sweep) | 9.69 req/min | **11.45 req/min** | 1.18× | ~1.18× offered load |
+> | `26784d2db5b2` (n=100) | 9.39 req/min | **12.10 req/min** | 1.29× | ~1.29× offered load |
+>
+> **Capacity ≈ 11.5–12.1 requests/minute, reproduced in two independent sessions** — a 5.7% spread,
+> inside D24's ~7.5% cross-session band. Concurrency buys **1.18–1.29×** over strictly serial
+> service, which is prediction 1 stated as a capacity rather than as a slope, and is a *smaller*
+> multiple than the 2.29× throughput figure in finding 1 suggests. The knee is bracketed between
+> 1.0× (stable) and 2.0× (saturated); this grid does not locate it more precisely, and claiming a
+> knee at 2× because 2× is where a point happens to sit would be reading the sampling grid as data.
+>
+> **Which rows may be quoted as latency.** Only the unsaturated ones. Classification is not
+> `ρ > 1`: `completed_per_s` divides by a window running to the *last completion*, so a server
+> keeping up perfectly still reads `ρ = 1 + service × λ / n` — 1.09 at 1.0× and n=12. Correcting
+> that analytically rather than widening a threshold is what keeps the 1.0× cell (measured 1.09,
+> expected 1.09) and rejects the 2× cell (1.67 against 1.17).
+>
+> | offered | ρ | expected if keeping up | verdict | quotable TTFT |
+> |---|---:|---:|---|---|
+> | 0.5× | 0.97 | 1.04 | stable | **p50 3.92 s, p95 9.78 s** |
+> | 1.0× | 1.09 | 1.09 | stable | **p50 5.30 s, p95 12.67 s** |
+> | 2.0× | 1.67 | 1.17 | saturated | run-length dependent — do not quote |
+> | 4.0× | 3.44 | 1.34 | saturated | run-length dependent — do not quote |
+>
+> `scripts/colab_poisson.py` now classifies every cell, prints the queueing prediction beside the
+> measurement, and refuses to present a saturated row's tail as a server property;
+> `make_plots.plot_serving_tradeoff` shades the saturated region for the same reason. Nine tests in
+> `tests/test_load.py` pin the classifier against all five measured cells, because the failure it
+> prevents — a divergent quantity printed to three decimal places — is invisible in the output.
+>
+> **Does finding 2 survive?** The chunked/unchunked comparison was run at 2×, inside the saturated
+> region. Both arms shared an offered load, an arrival seed and a request count, so the comparison
+> is internally controlled and the *ratios* stand. But the absolute seconds in it are run-length
+> dependent like everything else at 2×, and the cleaner version of that experiment reruns both arms
+> at 1.0×. Worth doing at the same time as the `--max-prefills-per-step 4` control above; together
+> they are one ~6-minute session.
 
 ---
 
