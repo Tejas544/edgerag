@@ -228,6 +228,24 @@ Splits the same way Phase 4 did: **logic and correctness are local, every number
 **Cut line if time runs short:** 5e's Poisson harness before 5c's chunked prefill. A correct
 scheduler with a measured TTFT problem is a better result than an unmeasured scheduler.
 
+> **5e was cut, and is now built and awaiting one T4 session.** The cut was taken as written —
+> 5c shipped, 5e did not — which left the scheduler correct and entirely unmeasured, and left the
+> throughput/p99 half of `01_EDGERAG.md` §6 blank. The driver is `bench/load.py` (open-loop
+> Poisson, model-agnostic, 15 tests against a fake executor), the runner is
+> `scripts/colab_poisson.py`, the figure is `make_plots.plot_serving_tradeoff`, and the runbook
+> is `notebooks/COLAB.md` §8c. Predictions are recorded in the runner's docstring **before** the
+> measurement, per this phase's own standard.
+>
+> Two things the build already settled without a T4:
+> - **`SchedulerConfig.prefill_chunk_size` is read by nothing.** `ModelExecutor.chunk_size` is
+>   what slices a prefill. A sweep that turned the scheduler's copy would have produced two
+>   identical arms and the confident conclusion that chunked prefill does not help;
+>   `tests/test_load.py` now pins the distinction so it cannot be turned by mistake.
+> - **The ship pool admits exactly one request**, so concurrency at the shipped configuration is
+>   capped by the 4 GiB budget rather than by the scheduler. The sweep therefore runs a
+>   deliberately over-budget pool and reports both numbers — measuring the scheduler where it has
+>   room is the only way that contrast becomes a finding rather than a flat line.
+
 ---
 
 ## Phase 5 (original outline) — Aug 16 · ~5 hrs

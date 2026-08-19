@@ -315,6 +315,98 @@ def plot_pruning_curve() -> Path:
     return _save(fig, "pruning_curve.png")
 
 
+def plot_serving_tradeoff() -> Path:
+    """Phase 5e's gate: throughput and tail TTFT on one pair of axes.
+
+    ``01_EDGERAG.md`` §5 Day 8 asks for both "on the same axes -- show the tradeoff, do not bury
+    it", and the instruction is doing real work. Drawn separately, the throughput curve is a
+    success story and the latency curve is somebody else's problem; drawn together, the point
+    where one stops improving and the other keeps degrading is the whole result.
+
+    The tail series is **p95, not p99**. At the sample sizes a T4 session affords, ``p99`` is the
+    single worst request wearing a percentile's name -- ``Percentiles.p99_is_reliable`` says so per
+    row, and plotting it anyway would launder that into a chart nobody re-checks.
+    """
+    path = RESULTS / "poisson_sweep.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    by_cell = {row["cell"]: row for row in rows}  # append-only file: last write per cell wins
+    chunked = sorted(
+        (r for r in by_cell.values() if r["chunked_prefill"] and r["ttft_s"]),
+        key=lambda r: r["load_factor"],
+    )
+    if len(chunked) < 2:
+        raise ValueError(
+            f"{path.name} has {len(chunked)} chunked-prefill cell(s); the tradeoff needs at least "
+            "two offered loads. Run scripts.colab_poisson with more --load-factors."
+        )
+
+    loads = [r["load_factor"] for r in chunked]
+    throughput = [r["output_tokens_per_s"] for r in chunked]
+    ttft_p50 = [r["ttft_s"]["p50"] for r in chunked]
+    ttft_p95 = [r["ttft_s"]["p95"] for r in chunked]
+
+    fig, ax = plt.subplots(figsize=(9.0, 5.4), facecolor=SURFACE)
+    tail = ax.twinx()
+    tail.set_facecolor("none")
+    for side in ("top", "left"):
+        tail.spines[side].set_visible(False)
+    tail.spines["right"].set_color(GRID)
+    tail.tick_params(colors=MUTED, labelsize=9, length=0)
+
+    ax.plot(loads, throughput, color=BLUE, linewidth=2, marker="o", markersize=7,
+            markeredgecolor=SURFACE, markeredgewidth=2, zorder=4)
+    tail.plot(loads, ttft_p95, color=ORANGE, linewidth=2, marker="s", markersize=6,
+              markeredgecolor=SURFACE, markeredgewidth=2, zorder=4)
+    tail.plot(loads, ttft_p50, color=ORANGE, linewidth=1.4, linestyle=(0, (4, 3)),
+              marker="s", markersize=4, markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
+
+    ax.text(loads[-1], throughput[-1], "  throughput", fontsize=9.5, color=BLUE, va="center")
+    tail.text(loads[-1], ttft_p95[-1], "  TTFT p95", fontsize=9.5, color=ORANGE, va="center")
+    tail.text(loads[-1], ttft_p50[-1], "  p50", fontsize=9, color=ORANGE, va="center", alpha=0.8)
+
+    peak = max(chunked, key=lambda r: r["output_tokens_per_s"])
+    if peak is not chunked[-1]:
+        ax.axvline(peak["load_factor"], color=LIMIT, linewidth=1.2, linestyle=(0, (2, 3)),
+                   zorder=2)
+        # Anchored under the curve rather than above it: when the peak is the leftmost point --
+        # which is what a server already saturated at 1x looks like -- a label at the top of the
+        # axes lands straight on the throughput series' own end label.
+        ax.text(peak["load_factor"], max(throughput) * 0.12,
+                f"  throughput peaks at {peak['load_factor']:g}x\n  and falls after it",
+                fontsize=8.5, color=LIMIT, va="bottom")
+
+    ax.set_ylim(0, max(throughput) * 1.25)
+    tail.set_ylim(0, max(ttft_p95) * 1.25)
+    _style(ax)
+    _label(
+        ax,
+        "Past saturation, offered load buys queue rather than work",
+        "Open-loop Poisson arrivals against the frozen trace. Offered load is a multiple\n"
+        "of the measured single-request service rate, so 1.0x is exactly break-even.",
+        xlabel="offered load (x single-request service rate)",
+        ylabel="aggregate output tokens/s",
+    )
+    tail.set_ylabel("time to first token (s)", fontsize=9.5, color=INK_2, labelpad=10)
+
+    row = chunked[0]
+    # Read from the record, never asserted. Every other figure in this project can say "Tesla T4"
+    # because a non-T4 run cannot reach results/ at all -- this one is the same, but a plot that
+    # *prints* the device it was told rather than the device it assumes is the difference between
+    # catching an untrusted row and framing it (CONTEXT.md D4).
+    device = row.get("device", "unknown device")
+    untrusted = "" if row.get("trusted", False) else "  ** UNTRUSTED DEVICE -- NOT PUBLISHABLE **"
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    _provenance(
+        fig,
+        f"{device}, {row['arm']}, workload {row['workload_fingerprint']}, "
+        f"{row['n_requests']} requests per point, pool {row['num_blocks']} blocks "
+        f"({row['concurrency_supported']} concurrent; the 4 GiB ship pool admits "
+        f"{row['ship_pool_concurrency']}). Tail is p95 -- n per cell is far under the 100 a p99 "
+        f"would need.{untrusted}",
+    )
+    return _save(fig, "serving_tradeoff.png")
+
+
 def _save(fig, name: str) -> Path:
     PLOTS.mkdir(parents=True, exist_ok=True)
     path = PLOTS / name
@@ -340,6 +432,17 @@ def main(argv: list[str] | None = None) -> int:
     plot_budget(arms, ledger)
     plot_quantization_tradeoff(arms)
     plot_pruning_curve()
+
+    # Phase 5e lands after the other three and needs a T4 session of its own. Missing is the
+    # normal state until that session runs, so it is skipped with a pointer rather than failing
+    # the whole render and taking the three finished plots down with it.
+    sweep = RESULTS / "poisson_sweep.jsonl"
+    if sweep.exists():
+        plot_serving_tradeoff()
+    else:
+        print(f"  skipped serving_tradeoff.png -- no {sweep.relative_to(REPO_ROOT)} yet "
+              "(run scripts.colab_poisson on a T4)")
+
     print("\nEvery axis is read from results/ at render time -- none of these numbers is typed in.")
     return 0
 

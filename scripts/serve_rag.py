@@ -30,20 +30,11 @@ from pathlib import Path
 
 import torch
 
-from bench.pipeline import free_duplicate_hf_decoder
-from edgerag.cache.allocator import BlockAllocator
-from edgerag.core.loader import HEADLINE_MODEL, load_model
-from edgerag.core.model import load_from_hf
-from edgerag.core.quant import QuantConfig
-from edgerag.retrieval.corpus import load_corpus
-from edgerag.retrieval.index import FlatIndex
-from edgerag.sched.scheduler import Scheduler, SchedulerConfig
+from bench.serving import build_stack
+from edgerag.core.loader import HEADLINE_MODEL
 
 try:
     from edgerag.serve.app import ServerState, create_app
-    from edgerag.serve.engine import InferenceEngine
-    from edgerag.serve.executor import ModelExecutor
-    from edgerag.serve.pipeline import RagPipeline
 except ImportError as exc:  # pragma: no cover -- depends on how the env was installed
     # FastAPI is an optional extra, and a bare "No module named 'fastapi'" sends people looking
     # for a bug in their code rather than at their install command. Say what to run.
@@ -70,62 +61,34 @@ def build_server(
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
 ):
-    """Assemble everything and return ``(app, engine)``. The engine is already running."""
-    spec_bits = {} if arm == "fp16" else arm_spec(arm, bits)
-    language_bits, vision_bits = spec_bits.get("language"), spec_bits.get("vision")
+    """Assemble everything and return ``(app, engine)``. The engine is already running.
 
-    print(f"loading {model_id} as {arm} {spec_bits or '(no quantization)'}")
-    lm = load_model(model_id, device=device, dtype=dtype)
-    decoder = load_from_hf(
-        lm.spec,
-        lm.model,
-        quant_config=(
-            QuantConfig(group_size=group_size, bits=language_bits) if language_bits else None
-        ),
-    )
-    # The HF text decoder is now a duplicate of weights we own -- 3.6 GiB held for nothing, which
-    # is what made every Phase 4 request OOM (BUGS.md B-05).
-    free_duplicate_hf_decoder(lm.model)
-
-    if vision_bits:
-        from edgerag.core.linear import quantize_module_
-
-        inner = lm.model.model
-        quantize_module_(inner.vision_model, QuantConfig(group_size=group_size, bits=vision_bits))
-        quantize_module_(inner.connector, QuantConfig(group_size=group_size, bits=vision_bits))
-
-    docs = load_corpus()
-    docs_by_key = {d.doc_key: d for d in docs}
-    # No image embeddings: D22 measured that signal as noise, and FlatIndex degrades to its text
-    # score cleanly rather than erroring. Startup is instant as a result.
-    index = FlatIndex.build(docs, image_embeddings={})
-    print(f"index: {len(docs)} pages, {sum(1 for d in docs if d.text)} with OCR text, "
-          f"vocab {index.vectorizer.vocab_size}")
-
-    allocator = BlockAllocator(num_blocks, block_size)
-    executor = ModelExecutor(
-        decoder, lm.spec, allocator, lm.device, dtype, chunk_size=chunk_size
-    )
-    scheduler = Scheduler(
-        allocator, SchedulerConfig(eos_token_id=lm.processor.tokenizer.eos_token_id)
-    )
-    engine = InferenceEngine(scheduler, executor)
-    engine.start()
-
-    rag = RagPipeline(
-        index=index, docs_by_key=docs_by_key, hf_model=lm.model, decoder=decoder,
-        processor=lm.processor, spec=lm.spec, device=lm.device, k=k, repo_root=REPO_ROOT,
+    The stack itself comes from :func:`bench.serving.build_stack`, which
+    ``scripts/colab_poisson.py`` also drives. That is deliberate: a load test measuring a
+    separately-assembled lookalike of this server would stop describing it the first time one of
+    the two got a fix (``bench/pipeline.py`` makes the same argument about the request path).
+    """
+    stack = build_stack(
+        model_id=model_id,
+        quant_spec={} if arm == "fp16" else arm_spec(arm, bits),
+        arm=arm,
+        group_size=group_size,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        chunk_size=chunk_size,
+        k=k,
+        device=device,
+        dtype=dtype,
     )
     app = create_app(
         ServerState(
-            engine=engine, tokenizer=lm.processor.tokenizer, model_id=f"{model_id}:{arm}", rag=rag
+            engine=stack.engine,
+            tokenizer=stack.lm.processor.tokenizer,
+            model_id=f"{model_id}:{arm}",
+            rag=stack.rag,
         )
     )
-
-    if torch.cuda.is_available():
-        print(f"resident: {torch.cuda.memory_allocated() / GIB:.2f} GiB "
-              f"(weights + {executor.pool_bytes / GIB:.2f} GiB block pool)")
-    return app, engine
+    return app, stack.engine
 
 
 def main(argv: list[str] | None = None) -> int:

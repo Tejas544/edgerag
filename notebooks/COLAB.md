@@ -204,6 +204,111 @@ Two checks while it runs:
 - **INT4 should still be ~4× slower than fp16.** That is D7's prediction and it survives the noise;
   what the clean session buys is the second decimal place, not the headline.
 
+### 8c · Phase 5e: the serving layer under load — ~18 min
+
+The gate that was cut when the schedule ran out, and the only one still missing. Phases 5a–5d
+proved the scheduler *correct* — admission, chunked prefill, preemption, pool conservation, all
+property-tested without a GPU — and then nothing ever put load on it. Everything downstream is
+still blank: the throughput-vs-concurrency plot, the p99 TTFT figure, and the two empty slots in
+`01_EDGERAG.md` §8's CV bullet.
+
+**Predictions, recorded here before the run so the result is allowed to disagree:**
+
+1. **Aggregate throughput rises far less than concurrency does.** D14 measured 1.32× aggregate for
+   4× batch on this checkpoint — it is MHA, decode is bandwidth-bound on KV reads at 192 KiB/token,
+   and a scheduler moves work around rather than moving bytes faster. Near-linear scaling here
+   should be distrusted before it is believed.
+2. **Chunked prefill wins p95 TTFT and loses a little throughput.** Fourteen 512-token chunks cost
+   more in launch overhead than one 6,758-token pass; what they buy is that a decoding request
+   waits one chunk instead of one whole prefill.
+3. **p95 TTFT degrades superlinearly past the service rate.** That is queueing theory, not a
+   property of this code — seeing it is a check that the driver really is open-loop.
+
+**Two things about the setup that are deliberate and will otherwise look like mistakes.**
+
+*The pool is bigger than the 4 GiB budget allows.* 1792 blocks × 16 tokens is ~5.25 GiB and admits
+4 concurrent requests. The shipped 640-block pool admits **exactly one** — a 6,758-token request
+needs ~425 blocks — so a concurrency sweep at the ship configuration would be a flat line
+describing the pool rather than the scheduler. The run prints both numbers. *The budget, not the
+scheduler, is what caps concurrency at the ship configuration* is the finding, and it only reads
+as a finding if the scheduler was measured somewhere it had room.
+
+*Prompts are built before the timed window.* Retrieval and the vision tower are once-per-request
+work on the caller's thread (`edgerag/serve/pipeline.py` says so and says why), and they do not
+vary with concurrency. Inside the window they would add a near-constant to every TTFT and shrink
+the relative size of the queueing being measured. The constant is recorded as `prompt_build_s`
+rather than dropped.
+
+This cell does not depend on step 8 — but running it after step 8 means the 4.5 GiB checkpoint is
+already cached, so it starts in seconds instead of minutes.
+
+**Smoke test first — ~4 min after the weights are cached.** Two requests at one load factor, no
+chunk comparison. It exercises prompt building, calibration, the driver, the summary and the file
+write, which is every part that can fail for a reason unrelated to load:
+
+```python
+!python -m scripts.colab_poisson --drive /content/drive/MyDrive/edgerag \
+    --out-name poisson_smoke.jsonl --n-requests 2 --n-prompts 2 \
+    --load-factors 1.0 --skip-chunk-comparison
+```
+
+**What good looks like:** a `pool:` block reporting **4 concurrent** at 1792 blocks and **1** at
+the shipped 640, a calibration line printing a service time in the 6–12 s range, then one cell
+line with `completed 2/2` and `Pool conservation held`. If the pool line says fewer than 2
+concurrent the run aborts and tells you what `--num-blocks` to pass instead.
+
+**The full sweep:**
+
+```python
+!python -m scripts.colab_poisson --drive /content/drive/MyDrive/edgerag
+```
+
+Four offered loads (0.5×, 1×, 2×, 4× the measured single-request service rate) plus one unchunked
+control at 2×. Offered load is expressed as a multiple of *measured* service rate rather than in
+requests/second, so the same numbers mean the same thing on fp16 and on INT4 — which fixed rates
+would not.
+
+**Read four things, in this order:**
+
+- **`Pool conservation held on every cell`.** Blocks free before == blocks free after. A leak does
+  not fail a cell; it silently shrinks every *later* cell's pool, so the sweep would report a
+  declining curve that is an artifact of its own earlier rows.
+- **the `in-flight` column against `admission blocked`.** If admission never blocked and in-flight
+  sat at 2, the binding constraint was `max_prefills_per_step=1`, not the block pool — one prefill
+  per iteration serialises 14-iteration prefills long before blocks run short. The summary says so
+  when it detects it. Pass `--max-prefills-per-step 2` to separate the two effects.
+- **the chunked-prefill table.** Same offered load, same arrival seed, one variable. Unchunked p95
+  TTFT should be the larger number; that ratio is what D18 and `BUGS.md` P-18 were written to
+  predict and has never been priced.
+- **the `*` on every p99.** At 12 requests per cell the p99 is the single worst request wearing a
+  percentile's name. Quote **p95 over n=12** in the README, not a p99 the sample cannot support.
+  A real p99 needs `--n-requests 100`, which is roughly an hour per cell — worth one cell at 2×
+  load if quota allows, not worth all five.
+
+Resumable per cell, fsync'd per cell. A disconnect costs one cell.
+
+**If you have quota for one more thing, make it this** — a real tail at the interesting load:
+
+```python
+!python -m scripts.colab_poisson --drive /content/drive/MyDrive/edgerag \
+    --out-name poisson_p99.jsonl --load-factors 2.0 --n-requests 100 --skip-chunk-comparison
+```
+
+**Bring it home and render the plot:**
+
+```python
+%cd /content/edgerag
+!mkdir -p results
+!cp /content/drive/MyDrive/edgerag/poisson_sweep.jsonl results/
+!python -m scripts.make_plots
+```
+
+`make_plots` skips `serving_tradeoff.png` with a pointer when the file is absent, so this is the
+cell that finally draws it. The figure names the device it was told about rather than assuming a
+T4, and stamps **UNTRUSTED DEVICE** across the provenance line if the record says so.
+
+---
+
 ### 9 · Boot the server and ask it a question — ~3 min
 
 Phase 7's gate end to end: retrieval, the quantized model, the paged cache, and streaming HTTP.
