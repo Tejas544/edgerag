@@ -39,7 +39,7 @@ import transformers
 from torch import nn
 from transformers import AutoModelForImageTextToText
 
-from edgerag.core.budget import GIB, BudgetLedger
+from edgerag.core.budget import GIB, BudgetLedger, plan_pool_for_budget
 from edgerag.core.linear import (
     FP16_BYTES,
     SKIP_RAGGED,
@@ -434,6 +434,8 @@ def render_markdown(
     ledger: BudgetLedger,
     summary: dict[str, Any],
     group_size: int,
+    serving: dict[str, Any] | None = None,
+    budget_gib: float = 4.0,
 ) -> str:
     """The two tables in the form they will be pasted into the README.
 
@@ -472,7 +474,109 @@ def render_markdown(
         f"{summary['kv_bytes_per_request'] / GIB:.2f} GiB of KV each. The fp16 arm supports none.",
         "",
     ]
+    if serving is not None:
+        lines += render_serving_budget(serving, budget_gib)
     return "\n".join(lines)
+
+
+#: The configuration ``scripts/serve_rag.py`` actually starts: INT8 where D23 found the quality
+#: cliff, INT4 where it did not. The uniform ``ARMS`` grid cannot express it -- which is exactly
+#: why the ledger priced ``LM+ViT@int4`` while the server ran something else, and nobody noticed.
+SHIP_SPEC: dict[str, int] = {"language": 8, "vision": 4, "connector": 4}
+
+
+def serving_budget(
+    per_bits: dict[int, list[Component]],
+    spec: ModelSpec,
+    budget_gib: float,
+    new_tokens: int,
+) -> dict[str, Any] | None:
+    """Price **the configuration that is served**, against the budget, with a derived pool.
+
+    The table above prices ``LM+ViT@int4`` with a KV term sized for one median request. The server
+    runs ``LM8+ViT4`` with a 640-block pool. Different weights *and* a different KV number -- and
+    the README quoted the first while shipping the second, printing 2.296 GiB of weights beside a
+    1.875 GiB pool a paragraph apart, summing to 4.495 GiB under a headline of 4.
+
+    Two things make this the honest table. The activation term is **measured on the serving path**
+    rather than inferred from the HF baseline, and measured *chunked*, which is what ships. And
+    the pool is derived from what the budget has left rather than chosen, so ``fits`` cannot be
+    true by construction -- what varies instead is the longest prompt admission will accept, which
+    is the real currency a memory budget buys.
+    """
+    from bench.serving import measured_activation_bytes
+
+    activation = measured_activation_bytes(chunked=True)
+    if activation is None:
+        return None
+
+    weights = 0
+    for bits, components in per_bits.items():
+        for component in components:
+            if SHIP_SPEC.get(component.name) == bits:
+                weights += component.bytes_when(True)
+    if weights == 0:
+        return None  # --bits did not include the widths the ship spec needs
+
+    plan = plan_pool_for_budget(
+        kv_bytes_per_token=spec.kv_bytes_per_token(),
+        weights_bytes=weights,
+        activation_bytes=activation,
+        budget_gib=budget_gib,
+    )
+
+    # What fraction of the frozen trace this budget can actually serve. A budget that fits "a
+    # median request" while refusing a quarter of real ones has to say so in the same breath.
+    lengths = request_lengths()
+    admissible = [t for t in lengths if t + new_tokens <= plan.max_prompt_tokens]
+    shipped = weights + activation + 640 * 16 * spec.kv_bytes_per_token()
+    return {
+        "spec": dict(SHIP_SPEC),
+        "activation_bytes": activation,
+        "activation_source": "measured on the serving path, chunked prefill (CONTEXT.md D26)",
+        "plan": plan.to_dict(),
+        "trace_requests": len(lengths),
+        "trace_requests_admissible": len(admissible),
+        "shipped_640_block_total_bytes": shipped,
+    }
+
+
+def render_serving_budget(payload: dict[str, Any], budget_gib: float) -> list[str]:
+    """The serving-budget table, in the form the README carries it."""
+    plan = payload["plan"]
+    n, ok = payload["trace_requests"], payload["trace_requests_admissible"]
+    over = payload["shipped_640_block_total_bytes"] - int(budget_gib * GIB)
+    rows = [
+        ("weights, LM8+ViT4", plan["weights_bytes"],
+         "int8 language, int4 vision -- measured on a T4, ledger delta 0 bytes (D24)"),
+        ("activation + workspace", plan["activation_bytes"],
+         "**measured** on the serving path at chunk 512; 0.796 GiB unchunked (D26)"),
+        ("KV block pool", plan["pool_bytes"],
+         f"{plan['num_blocks']} blocks x {plan['block_size']} tokens -- derived from the budget"),
+    ]
+    verdict = "**within budget**" if plan["fits"] else "**OVER BUDGET**"
+    lines = [
+        "",
+        f"## The serving budget: what `serve_rag.py` starts, against {budget_gib:.0f} GiB",
+        "",
+        "| component | bytes | GiB | note |",
+        "|---|---:|---:|---|",
+    ]
+    lines += [f"| {name} | {b:,} | {b / GIB:.4f} | {note} |" for name, b, note in rows]
+    lines += [
+        f"| **total** | **{plan['total_bytes']:,}** | **{plan['total_bytes'] / GIB:.4f}** | "
+        f"budget {budget_gib:.2f} GiB -- {verdict} |",
+        "",
+        f"**A budget buys a prompt length**, and this one buys "
+        f"**{plan['max_prompt_tokens']:,} tokens** -- covering **{ok} of {n}** frozen-trace "
+        f"requests ({ok / n:.0%}). The rest are refused at admission rather than discovered as an "
+        "OOM mid-decode, and that refusal rate is the honest price of the headline.",
+        "",
+        f"The previously shipped 640-block pool put the same configuration at "
+        f"**{payload['shipped_640_block_total_bytes'] / GIB:.3f} GiB, {over / MIB:.0f} MiB over**. "
+        "Nothing was wrong with 640 on its own terms; it was never subtracted from anything.",
+    ]
+    return lines
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -514,6 +618,27 @@ def main(argv: list[str] | None = None) -> int:
     print("  The fp16 arm supports ZERO: its weights alone are over the budget, which is why the "
           "comparison\n  is not '4x less memory' but 'runs at all versus does not'.")
 
+    serving = serving_budget(per_bits, spec, args.budget_gib, args.max_new_tokens)
+    if serving is None:
+        print("\n  (no serving budget: results/poisson_sweep.jsonl carries no measured "
+              "activation term yet -- run scripts.colab_poisson on a T4)")
+    else:
+        plan = serving["plan"]
+        print(f"\n=== the SERVED configuration, LM8+ViT4, against {args.budget_gib:.0f} GiB ===\n")
+        print(f"  weights {plan['weights_bytes'] / GIB:.3f} + activation "
+              f"{plan['activation_bytes'] / GIB:.3f} (MEASURED, chunked) + pool "
+              f"{plan['pool_bytes'] / GIB:.3f} = {plan['total_bytes'] / GIB:.3f} GiB -- "
+              f"{'fits' if plan['fits'] else 'OVER BUDGET'}")
+        print(f"  the pool is derived, not chosen: {plan['num_blocks']} blocks x "
+              f"{plan['block_size']} tokens, longest admissible prompt "
+              f"{plan['max_prompt_tokens']:,} tokens")
+        print(f"  which serves {serving['trace_requests_admissible']}/"
+              f"{serving['trace_requests']} frozen-trace requests -- the rest are refused at "
+              "admission, not OOM'd mid-decode.")
+        shipped = serving["shipped_640_block_total_bytes"]
+        print(f"  the previously shipped 640-block pool summed to {shipped / GIB:.3f} GiB, "
+              f"over by {(shipped - args.budget_gib * GIB) / MIB:.0f} MiB.")
+
     payload = {
         "model": args.model,
         "computed": "exact from checkpoint config; meta-device instantiation, no weights loaded",
@@ -545,6 +670,7 @@ def main(argv: list[str] | None = None) -> int:
         "skips": skips,
         "ledger": ledger.to_dict(),
         "summary": summary,
+        "serving_budget": serving,
     }
     out = REPO_ROOT / args.out
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -553,7 +679,8 @@ def main(argv: list[str] | None = None) -> int:
     md = out.with_suffix(".md")
     md.write_text(
         render_markdown(
-            args.model, matrix, per_bits[args.ship_bits], ledger, summary, args.group_size
+            args.model, matrix, per_bits[args.ship_bits], ledger, summary, args.group_size,
+            serving=serving, budget_gib=args.budget_gib,
         ),
         encoding="utf-8",
     )

@@ -17,9 +17,16 @@ ones, not plausible ones:
 * **Chunked prefill at 512** (D18), so one 7,000-token retrieved prompt cannot monopolise the GPU
   while other requests decode (P-18).
 
-The block pool is the memory knob. 640 blocks x 16 tokens is ~1.9 GiB, enough for one ~7k-token
-RAG request with room to grow; raise it for concurrency, and the budget arithmetic is in
-``scripts/measure_memory_ledger.py``.
+* **The pool is sized from the 4 GiB budget, not chosen.** ``--budget-gib 4.0`` subtracts the
+  measured weights and the measured activation term and spends what is left on blocks: **471
+  blocks at 1.380 GiB, for 4.000 GiB total.** The previous default of 640 blocks was 1.875 GiB and
+  put the pipeline at **4.495 GiB -- 507 MiB over the budget this project is named after**. Nobody
+  had done the subtraction; the README printed the two numbers a paragraph apart.
+
+  What a budget buys is a *prompt length*, and this one buys **7,472 tokens**. Requests longer
+  than that are refused by admission rather than discovered as an OOM mid-decode -- which is 25%
+  of the frozen trace, and the honest cost of the headline. ``--budget-gib 0`` restores sizing by
+  ``--num-blocks`` for anyone who would rather serve every request and quote 4.5 GiB.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ def build_server(
     num_blocks: int = 640,
     block_size: int = 16,
     chunk_size: int = 512,
+    budget_gib: float | None = None,
     k: int = 5,
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
@@ -76,6 +84,7 @@ def build_server(
         num_blocks=num_blocks,
         block_size=block_size,
         chunk_size=chunk_size,
+        budget_gib=budget_gib,
         k=k,
         device=device,
         dtype=dtype,
@@ -101,7 +110,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--bits", type=int, default=4, help="ignored for mixed arms")
     parser.add_argument("--group-size", type=int, default=128)
-    parser.add_argument("--num-blocks", type=int, default=640)
+    parser.add_argument(
+        "--budget-gib", type=float, default=4.0,
+        help=(
+            "size the block pool from this memory budget instead of from --num-blocks, so the "
+            "4 GiB headline holds by construction. Needs the measured activation term from "
+            "results/poisson_sweep.jsonl. Pass 0 to size by --num-blocks instead."
+        ),
+    )
+    parser.add_argument(
+        "--num-blocks", type=int, default=640,
+        help="pool size when --budget-gib is 0. 640 x 16 tokens is 1.875 GiB, which with weights "
+             "and activation lands at 4.495 GiB -- over the budget this project is named after.",
+    )
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("-k", type=int, default=5, help="pages retrieved per question")
     parser.add_argument("--host", default="127.0.0.1")
@@ -118,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     app, engine = build_server(
         model_id=args.model, arm=args.arm, bits=args.bits, group_size=args.group_size,
         num_blocks=args.num_blocks, chunk_size=args.chunk_size, k=args.k, device=args.device,
+        budget_gib=args.budget_gib or None,
         dtype=torch.float16 if args.device == "cuda" else torch.float32,
     )
     print(f"\nserving on http://{args.host}:{args.port}  --  POST /v1/chat/completions\n")

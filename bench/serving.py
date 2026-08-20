@@ -19,6 +19,7 @@ defines it, instead of making ``bench/`` depend on a script.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ import torch
 
 from bench.pipeline import free_duplicate_hf_decoder
 from edgerag.cache.allocator import BlockAllocator
+from edgerag.core.budget import PoolPlan, plan_pool_for_budget
 from edgerag.core.loader import HEADLINE_MODEL, load_model
 from edgerag.core.model import load_from_hf
 from edgerag.core.quant import QuantConfig
@@ -40,11 +42,70 @@ from edgerag.serve.pipeline import RagPipeline
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIB = 1024**3
 
+#: Where the measured activation term comes from. Phase 5e is the first run that recorded a peak
+#: alongside the exact weights and pool it was measured with, which is what makes the subtraction
+#: possible at all -- earlier runs had to infer the term from the HF baseline (``CONTEXT.md`` D21).
+SWEEP_PATH = REPO_ROOT / "results" / "poisson_sweep.jsonl"
+
+
+def measured_activation_bytes(
+    chunked: bool = True, path: Path | None = None, model_id: str = HEADLINE_MODEL
+) -> int | None:
+    """Transient peak above weights and pool, read off a Phase 5e cell **for this model**.
+
+    ``peak - weights - pool`` on a record that stamps all three. Returns ``None`` when no matching
+    sweep is on file rather than guessing, because a fabricated activation term is exactly the
+    failure ``BUGS.md`` P-25 describes: the table sums under budget and the pipeline OOMs anyway.
+
+    Three filters, and each one exists because ignoring it produces a plausible wrong number:
+
+    * **``model_id``.** Activation scales with hidden size and prompt length. Sizing the 256M
+      fixture's pool from the 2.2B's 0.324 GiB would silently reserve ~10x what it needs -- and
+      the failure is invisible, because the server starts fine and just serves shorter prompts
+      than it could.
+    * **``chunked``.** 0.324 GiB against 0.796 unchunked; the wrong one mis-sizes by 484 MiB.
+    * **``trusted``.** An untrusted-device residual is not publishable and must not silently
+      become a production pool size (``CONTEXT.md`` D4).
+    """
+    path = path or SWEEP_PATH
+    if not path.exists():
+        return None
+    candidates = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("model") != model_id:
+            continue
+        if row.get("chunked_prefill") is not chunked or not row.get("trusted"):
+            continue
+        residual = row["peak_allocated_bytes"] - row["weight_bytes"] - row["pool_bytes"]
+        if residual > 0:
+            candidates.append(residual)
+    # The maximum, not the mean: this is a high-water mark being reserved against, and averaging
+    # two peaks produces a number neither run stayed under.
+    return max(candidates) if candidates else None
+
 #: Blocks in the served pool. 640 x 16 tokens is ~1.9 GiB, which holds exactly **one** median RAG
 #: request (~6,758 prompt tokens + generation = ~425 blocks). That is the ship configuration and
 #: it is deliberate; see ``concurrency_supported`` for why a *concurrency* sweep must raise it.
 DEFAULT_NUM_BLOCKS = 640
 DEFAULT_BLOCK_SIZE = 16
+
+
+def resident_weight_bytes(lm: Any, decoder: torch.nn.Module) -> int:
+    """Bytes held by what actually runs: our decoder plus HuggingFace's surviving vision half.
+
+    The HF text decoder is freed during assembly (``BUGS.md`` B-05), so summing ``lm.model`` alone
+    would miss everything we own. Needed before the pool exists, because the pool's size is
+    derived from what the weights left over.
+    """
+    inner = getattr(lm.model, "model", lm.model)
+    total = 0
+    for module in (decoder, inner.vision_model, inner.connector):
+        total += sum(t.numel() * t.element_size() for t in module.parameters())
+        total += sum(t.numel() * t.element_size() for t in module.buffers())
+    return total
 
 
 @dataclass
@@ -68,20 +129,13 @@ class ServingStack:
     model_id: str
     arm: str
 
+    #: Set when the pool was sized from a memory budget rather than from ``num_blocks``.
+    pool_plan: PoolPlan | None = None
+
     @property
     def weight_bytes(self) -> int:
-        """Bytes the model actually holds: our decoder plus the surviving vision half.
-
-        The HF text decoder is freed during assembly (B-05), so summing ``lm.model`` alone would
-        undercount by everything we own and overcount nothing.
-        """
-        inner = getattr(self.lm.model, "model", self.lm.model)
-        modules = [self.decoder, inner.vision_model, inner.connector]
-        total = 0
-        for module in modules:
-            total += sum(t.numel() * t.element_size() for t in module.parameters())
-            total += sum(t.numel() * t.element_size() for t in module.buffers())
-        return total
+        """Bytes the model actually holds: our decoder plus the surviving vision half."""
+        return resident_weight_bytes(self.lm, self.decoder)
 
     def blocks_per_request(self, prompt_tokens: int, max_new_tokens: int) -> int:
         return self.allocator.blocks_needed(prompt_tokens + max_new_tokens)
@@ -113,6 +167,7 @@ def build_stack(
     chunk_size: int = 512,
     max_batch_size: int = 8,
     max_prefills_per_step: int = 1,
+    budget_gib: float | None = None,
     k: int = 5,
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
@@ -160,6 +215,33 @@ def build_stack(
         print(f"index: {len(docs)} pages, {sum(1 for d in docs if d.text)} with OCR text, "
               f"vocab {index.vectorizer.vocab_size}")
 
+    # Size the pool *from* the budget when one is given, rather than accepting a block count and
+    # discovering afterwards what it summed to. The activation term is measured, not assumed, and
+    # the run refuses to invent one -- a budget table with a fabricated transient line is
+    # `BUGS.md` P-25: it sums under budget and the pipeline OOMs anyway.
+    pool_plan = None
+    if budget_gib is not None:
+        activation = measured_activation_bytes(chunked=True, model_id=model_id)
+        if activation is None:
+            raise FileNotFoundError(
+                f"--budget-gib needs an activation term measured for {model_id!r} with chunked "
+                f"prefill, and {SWEEP_PATH.name} has no such record. Run scripts.colab_poisson "
+                "against this model on a T4, or size the pool with --num-blocks instead. "
+                "Refusing to borrow another model's activation term: it would start cleanly and "
+                "reserve the wrong amount."
+            )
+        pool_plan = plan_pool_for_budget(
+            kv_bytes_per_token=lm.spec.kv_bytes_per_token(),
+            weights_bytes=resident_weight_bytes(lm, decoder),
+            activation_bytes=activation,
+            budget_gib=budget_gib,
+            block_size=block_size,
+            reserve_blocks=SchedulerConfig().cow_reserve_blocks,
+        )
+        num_blocks = pool_plan.num_blocks
+        if verbose:
+            print(f"pool sized from budget: {pool_plan.describe()}")
+
     allocator = BlockAllocator(num_blocks, block_size)
     executor = ModelExecutor(
         decoder, lm.spec, allocator, lm.device, dtype, chunk_size=chunk_size
@@ -193,5 +275,5 @@ def build_stack(
     return ServingStack(
         lm=lm, decoder=decoder, index=index, docs_by_key=docs_by_key, allocator=allocator,
         executor=executor, scheduler=scheduler, engine=engine, rag=rag,
-        model_id=model_id, arm=arm,
+        model_id=model_id, arm=arm, pool_plan=pool_plan,
     )

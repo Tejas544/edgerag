@@ -1511,6 +1511,53 @@ because the scheduler was measured somewhere it had room.
 
 ---
 
+## D26 · The activation term is measurable now, and the 4 GiB claim did not survive it · **MEASURED** · 2026-08-19
+
+D21 called the activation line "the one line in the ledger that is not exact" and inferred it from
+the HF baseline. Phase 5e is the first run that stamped a peak *alongside the exact weights and
+pool it was measured with*, which makes the subtraction possible rather than inferential:
+
+| configuration | peak | − weights | − pool | = activation |
+|---|---:|---:|---:|---:|
+| chunked, 512 | 7.870 | 2.296 | 5.250 | **0.324 GiB** |
+| unchunked | 8.342 | 2.296 | 5.250 | **0.796 GiB** |
+
+**Finding 1 — chunked prefill cuts the activation high-water mark by 484 MiB (2.46×)**, because it
+bounds the largest tensor a forward pass ever materialises. D25 priced chunking as a latency
+trade; this is a third axis it was never measured on.
+
+**Finding 2 — the served configuration was 507 MiB over the budget this project is named after,
+and the README contained the evidence.** It printed "2.30 GiB of weights" and "a 1.88 GiB block
+pool" a paragraph apart under a 4 GiB headline. 2.296 + 1.875 + 0.324 = **4.495 GiB**. The
+addition was simply never done, and it pointed at `results/memory_ledger.md` for "the arithmetic"
+— a table that priced `LM+ViT@int4` with a right-sized KV term, which is **not the arm the server
+runs**. Two artifacts describing two different systems, each internally consistent.
+
+**Finding 3 — the fix is to derive the pool from the budget rather than choose it and compare.**
+`plan_pool_for_budget()` subtracts measured weights and measured activation and spends the
+remainder on blocks: **471 blocks, 1.380 GiB, 4.000 GiB total.** `within_budget` can no longer be
+true by construction, because what varies instead is the longest admissible prompt — **7,472
+tokens, covering 29 of 40 trace requests.** The longest 27% are refused at admission rather than
+OOM'd mid-decode. *A memory budget buys a prompt length* is the honest statement of the thesis,
+and it is strictly more informative than "it fits".
+
+**Finding 4 — chunked prefill is load-bearing for the headline, which is not why it was built.**
+Unchunked, weights + activation are 3.09 GiB and the remaining 0.91 GiB does not hold one median
+request's KV: **no pool size fits.** So the feature D25 measured as costing 1.51× on p95 TTFT is
+the same feature the 4 GiB claim rests on.
+
+**What this does not fix.** The 4.000 GiB total is *computed* from two measured terms, not
+measured end to end. The obvious next check is booting `serve_rag --budget-gib 4.0` under
+`MemoryBudget(4.0)` on a T4 and confirming the peak lands under it — the class already exists and
+has never been pointed at the server. Until then this is a prediction with two measured inputs,
+which is what `COMPUTED_BASIS` says of every ledger row and is worth repeating here.
+
+The CUDA context (300–600 MiB on Turing) remains excluded and unmeasured — P3, still open, and at
+4.000 GiB of 4.00 there is now exactly zero slack to absorb it. On a 4 GB card this configuration
+would not load. That is a real limitation of the claim and not a rounding note.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |

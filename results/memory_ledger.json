@@ -509,5 +509,28 @@
     "headroom_bytes": 940328224,
     "concurrent_requests": 1.7,
     "within_budget": true
+  },
+  "serving_budget": {
+    "spec": {
+      "language": 8,
+      "vision": 4,
+      "connector": 4
+    },
+    "activation_bytes": 347734016,
+    "activation_source": "measured on the serving path, chunked prefill (CONTEXT.md D26)",
+    "plan": {
+      "num_blocks": 471,
+      "block_size": 16,
+      "pool_bytes": 1481637888,
+      "weights_bytes": 2465137152,
+      "activation_bytes": 347734016,
+      "total_bytes": 4294509056,
+      "budget_bytes": 4294967296,
+      "max_prompt_tokens": 7472,
+      "fits": true
+    },
+    "trace_requests": 40,
+    "trace_requests_admissible": 29,
+    "shipped_640_block_total_bytes": 4826137088
   }
 }

@@ -30,3 +30,17 @@ The fp16 row is over a 4 GiB budget on weights alone, before one KV block is all
 Computed exactly from tensor shapes, not measured -- the budget itself is defined on `torch.cuda.max_memory_allocated()` (`CONTEXT.md` P3), and this table is the prediction that measurement will be checked against. **Excludes the CUDA context** (**not measured on this device** -- 300-600 MiB on Turing, per CONTEXT.md P3), which is reported separately because it is a driver cost, not a pipeline cost.
 
 Headroom 0.88 GiB = **1.7 concurrent requests** at 1.25 GiB of KV each. The fp16 arm supports none.
+
+
+## The serving budget: what `serve_rag.py` starts, against 4 GiB
+
+| component | bytes | GiB | note |
+|---|---:|---:|---|
+| weights, LM8+ViT4 | 2,465,137,152 | 2.2958 | int8 language, int4 vision -- measured on a T4, ledger delta 0 bytes (D24) |
+| activation + workspace | 347,734,016 | 0.3239 | **measured** on the serving path at chunk 512; 0.796 GiB unchunked (D26) |
+| KV block pool | 1,481,637,888 | 1.3799 | 471 blocks x 16 tokens -- derived from the budget |
+| **total** | **4,294,509,056** | **3.9996** | budget 4.00 GiB -- **within budget** |
+
+**A budget buys a prompt length**, and this one buys **7,472 tokens** -- covering **29 of 40** frozen-trace requests (72%). The rest are refused at admission rather than discovered as an OOM mid-decode, and that refusal rate is the honest price of the headline.
+
+The previously shipped 640-block pool put the same configuration at **4.495 GiB, 507 MiB over**. Nothing was wrong with 640 on its own terms; it was never subtracted from anything.

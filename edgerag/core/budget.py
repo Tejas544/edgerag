@@ -189,3 +189,111 @@ class BudgetLedger:
             "because it is a driver cost, not a pipeline cost."
         )
         return "\n".join(lines) + "\n"
+
+
+# --- Sizing the block pool *from* the budget, rather than choosing it and hoping ----------------
+
+
+@dataclass(frozen=True)
+class PoolPlan:
+    """How large a block pool a memory budget actually leaves room for.
+
+    The shipped default was 640 blocks, chosen as "enough for one ~7k request with room to grow".
+    It is 1.875 GiB, and against 2.296 GiB of weights and a measured 0.324 GiB of activation it
+    puts the pipeline at 4.495 GiB -- **507 MiB over the 4 GiB this project is named after**. The
+    number was never wrong on its own terms; it was just never subtracted from anything.
+
+    Deriving it instead makes the headline true by construction and, more usefully, makes the
+    consequence visible: a budget does not buy an unlimited prompt, it buys ``max_prompt_tokens``
+    of one, and requests longer than that are refused by admission rather than discovered as an
+    OOM halfway through a decode.
+    """
+
+    num_blocks: int
+    block_size: int
+    reserve_blocks: int
+    budget_bytes: int
+    weights_bytes: int
+    activation_bytes: int
+    kv_bytes_per_token: int
+
+    @property
+    def pool_bytes(self) -> int:
+        return self.num_blocks * self.block_size * self.kv_bytes_per_token
+
+    @property
+    def total_bytes(self) -> int:
+        return self.weights_bytes + self.activation_bytes + self.pool_bytes
+
+    @property
+    def fits(self) -> bool:
+        return self.total_bytes <= self.budget_bytes
+
+    @property
+    def max_prompt_tokens(self) -> int:
+        """Longest prompt admission can accept, after holding back the copy-on-write reserve."""
+        return max(0, (self.num_blocks - self.reserve_blocks) * self.block_size)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "num_blocks": self.num_blocks,
+            "block_size": self.block_size,
+            "pool_bytes": self.pool_bytes,
+            "weights_bytes": self.weights_bytes,
+            "activation_bytes": self.activation_bytes,
+            "total_bytes": self.total_bytes,
+            "budget_bytes": self.budget_bytes,
+            "max_prompt_tokens": self.max_prompt_tokens,
+            "fits": self.fits,
+        }
+
+    def describe(self) -> str:
+        return (
+            f"budget {self.budget_bytes / GIB:.2f} GiB = weights {self.weights_bytes / GIB:.3f} "
+            f"+ activation {self.activation_bytes / GIB:.3f} + pool {self.pool_bytes / GIB:.3f} "
+            f"= {self.total_bytes / GIB:.3f} GiB ({self.num_blocks} blocks x {self.block_size} "
+            f"tokens, longest admissible prompt {self.max_prompt_tokens:,} tokens)"
+        )
+
+
+def plan_pool_for_budget(
+    kv_bytes_per_token: int,
+    weights_bytes: int,
+    activation_bytes: int,
+    budget_gib: float = DEFAULT_BUDGET_GIB,
+    block_size: int = 16,
+    reserve_blocks: int = 4,
+) -> PoolPlan:
+    """Largest block pool that keeps ``weights + activation + pool`` inside ``budget_gib``.
+
+    ``activation_bytes`` is a parameter rather than a constant on purpose. It is the one term here
+    that is measured rather than computed, it depends on whether prefill is chunked -- 0.324 GiB
+    at chunk 512 against 0.796 GiB unchunked, a 484 MiB difference -- and a number baked in here
+    would be a transcription of a measurement, which this project does not do. Callers read it
+    from ``results/`` and pass it in.
+
+    Raises when the budget cannot hold even one block, because returning a zero-block pool would
+    produce a server that starts cleanly and rejects every request.
+    """
+    budget_bytes = int(budget_gib * GIB)
+    spare = budget_bytes - weights_bytes - activation_bytes
+    bytes_per_block = block_size * kv_bytes_per_token
+    num_blocks = spare // bytes_per_block
+
+    if num_blocks < 1:
+        raise MemoryBudgetExceeded(
+            f"a {budget_gib:.2f} GiB budget leaves {spare / GIB:.3f} GiB after "
+            f"{weights_bytes / GIB:.3f} GiB of weights and {activation_bytes / GIB:.3f} GiB of "
+            f"activation -- not one {bytes_per_block / GIB:.3f} GiB block. Quantize further, "
+            "chunk the prefill, or raise the budget."
+        )
+
+    return PoolPlan(
+        num_blocks=int(num_blocks),
+        block_size=block_size,
+        reserve_blocks=reserve_blocks,
+        budget_bytes=budget_bytes,
+        weights_bytes=weights_bytes,
+        activation_bytes=activation_bytes,
+        kv_bytes_per_token=kv_bytes_per_token,
+    )
