@@ -1,0 +1,64 @@
+{
+  "recorded_utc": "2026-08-20T10:46:57.340102+00:00",
+  "base_url": "http://127.0.0.1:8302",
+  "model": "HuggingFaceTB/SmolVLM2-256M-Video-Instruct:fp16",
+  "question": "What percentage of users are female?",
+  "retrieved": [
+    "infographicvqa:98409:0",
+    "infographicvqa:98410:0",
+    "infographicvqa:98411:0",
+    "infographicvqa:98414:0",
+    "infographicvqa:98417:0"
+  ],
+  "device": "NVIDIA GeForce GTX 1650",
+  "trusted": false,
+  "prompt_tokens": 5760,
+  "total_s": 38.87484150007367,
+  "events": [
+    {
+      "t": 30.695230800076388,
+      "text": "infographicvqa:98409:0",
+      "kind": "meta"
+    },
+    {
+      "t": 30.695230800076388,
+      "text": "infographicvqa:98410:0",
+      "kind": "meta"
+    },
+    {
+      "t": 30.695230800076388,
+      "text": "infographicvqa:98411:0",
+      "kind": "meta"
+    },
+    {
+      "t": 30.695230800076388,
+      "text": "infographicvqa:98414:0",
+      "kind": "meta"
+    },
+    {
+      "t": 30.695230800076388,
+      "text": "infographicvqa:98417:0",
+      "kind": "meta"
+    },
+    {
+      "t": 38.35203609999735,
+      "text": " ",
+      "kind": "token"
+    },
+    {
+      "t": 38.50420700001996,
+      "text": "4",
+      "kind": "token"
+    },
+    {
+      "t": 38.627406700048596,
+      "text": "4",
+      "kind": "token"
+    },
+    {
+      "t": 38.75214130000677,
+      "text": "%",
+      "kind": "token"
+    }
+  ]
+}

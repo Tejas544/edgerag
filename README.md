@@ -7,6 +7,14 @@ The budget is not a target the project aims at; it is the number the block pool 
 at startup. What that buys is [a 7,472-token prompt](#does-it-actually-fit-in-4-gib), which covers
 73% of the benchmark workload — the other 27% is refused at admission and the README says so.
 
+![A recorded request: five pages retrieved, then the answer streamed token by token](results/demo.svg)
+
+<sup>A real recorded round trip, not a mockup — `results/demo_cast.json` is the transcript the
+animation is rendered from, and `python -m scripts.make_demo` rebuilds it. Recorded on the 256M
+fixture on a GTX 1650 because that is what fits on the dev box; **it shows that the path works,
+not how fast it is.** Every performance number below is Tesla T4 only, and the harness
+[refuses to record one anywhere else](#benchmarks).</sup>
+
 No LangChain. No LlamaIndex. No `model.generate()`. The paged KV-cache allocator, the
 continuous-batching scheduler, the visual-token compressor, and the quantized linear layers are
 written here, not imported.
@@ -418,7 +426,10 @@ and the predicted failure modes this design is built to avoid.
   INT8 0.42×, INT4 0.27×, with arms differing only in vision agreeing to 2.4%. `ViT@int8` and
   `LM8+ViT4` were not reached before the runtime was reclaimed, so their ratios still divide across
   sessions. Measured variance: **~2% within a session, ~7.5% across** (fp16 at 13.24, 13.94, 14.31),
-  which is why a cross-session comparison cannot resolve anything under ~10%.
+  which is why a cross-session comparison cannot resolve anything under ~10%. `python -m
+  scripts.latency_coverage` now answers which arms are covered by asking the files rather than
+  by re-reading console output, and prints the command that closes the gap — the widest single
+  session currently holds **3 of 8**.
 - **The `peak` column mixes two code versions.** Six arms were measured before the prefill-logits
   fix and two after, a 272 MiB difference in the transient term. Weights and quality are
   unaffected. Records now stamp `code_version` so this cannot recur silently.
@@ -473,6 +484,8 @@ and the predicted failure modes this design is built to avoid.
 | [`notebooks/COLAB.md`](notebooks/COLAB.md) | T4 runbook — every GPU measurement, in order |
 | `bench/` | Benchmark harness (written before any feature work) + the shared request pipeline |
 | `scripts/` | Measurement runners. `measure_*` are exact and local; `colab_*` require a T4 |
+| `scripts/make_demo.py` | Records a real request against a running server, renders the README SVG |
+| `scripts/latency_coverage.py` | Which arms have single-session latency, and how to finish (no GPU) |
 | `edgerag/core/` | Model, layers, quantized linear, memory budget |
 | `edgerag/cache/` | Naive and paged KV cache, block allocator, copy-on-write |
 | `edgerag/sched/` | Continuous-batching scheduler, admission control |

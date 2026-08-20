@@ -204,6 +204,41 @@ Two checks while it runs:
 - **INT4 should still be ~4× slower than fp16.** That is D7's prediction and it survives the noise;
   what the clean session buys is the second decimal place, not the headline.
 
+### 8bb · Close D24's cross-session latency gap — ~15 min
+
+D24 finding 3 is still open in one respect: the throughput column has never been measured with all
+eight arms in a single session, and cross-session `tok/s` carries ~7.5% clock variance — wider than
+several of the gaps the table reports. Two earlier attempts were reclaimed part-way, and the
+resolution had to be reconstructed by hand from console output.
+
+**Ask the files what is missing rather than guessing.** This needs no GPU and runs anywhere,
+including before you start a runtime:
+
+```python
+!python -m scripts.latency_coverage
+```
+
+It groups every `results/quant_latency*.jsonl` record by `session_id`, reports which session has
+the widest coverage and whether it carries an `fp16` anchor (without one the rows are absolute
+numbers with nothing to divide by), and **prints the exact command that would close the gap** —
+including a note about which extra arms the `--arms × --bits` cross product will also re-measure.
+
+Run whatever it prints. At the time of writing that is:
+
+```python
+!python -m scripts.colab_quant_ablation --drive /content/drive/MyDrive/edgerag \
+    --out-name quant_latency_finish.jsonl \
+    --arms fp16 LM LM+ViT ViT LM8+ViT4 --bits 8 4 --n-queries 2 --trials 5
+```
+
+**The last line of that run is the check.** It must read `SINGLE SESSION (<id>)`. Then re-run
+`latency_coverage` — it should print `COMPLETE`, at which point D24's cross-session caveat can be
+retired from `CONTEXT.md` and the README rather than carried forward another phase.
+
+Quality is *not* re-measured here and does not need to be: `fp16`, `LM@int8` and D20's independent
+pruning run all scored the same float to sixteen digits across three sessions, and every arm's
+`ledger_delta_bytes` is 0 every time. Only latency is session-sensitive.
+
 ### 8c · Phase 5e: the serving layer under load — ~18 min
 
 The gate that was cut when the schedule ran out, and the only one still missing. Phases 5a–5d
@@ -400,6 +435,51 @@ When you are done:
 
 ```python
 server.terminate(); server.wait(); log.close()
+```
+
+### 9b · A public URL you can put in front of an interviewer — ~1 min
+
+Step 9's server listens on `127.0.0.1` inside a Colab VM, which nobody else can reach. A
+Cloudflare quick tunnel puts it on a public hostname with no account and no config:
+
+```python
+!wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared
+!chmod +x /usr/local/bin/cloudflared
+
+import re, subprocess, time
+tunnel = subprocess.Popen(
+    ['cloudflared', 'tunnel', '--url', 'http://127.0.0.1:8000', '--no-autoupdate'],
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+)
+for line in tunnel.stdout:                      # the URL is printed once, then never again
+    found = re.search(r'https://[-\w]+\.trycloudflare\.com', line)
+    if found:
+        print('\npublic:', found.group(0))
+        print(f"try:    curl -N {found.group(0)}/v1/chat/completions \\")
+        print("          -H 'Content-Type: application/json' \\")
+        print('          -d \'{"messages":[{"role":"user","content":"What is the total?"}],'
+              '"max_tokens":32,"stream":true}\'')
+        break
+```
+
+**Read this before you paste the URL anywhere.** A quick tunnel is *public and unauthenticated* —
+anyone with the link can send requests to your GPU for as long as it is up, and the corpus pages
+come back in the `retrieved` field of every response. It dies with the tunnel process and with the
+runtime, so treat it as something you start for a call and stop afterwards, not as a deployment.
+`tunnel.terminate()` when you are done.
+
+The health endpoint is the cheapest thing to check first:
+
+```python
+!curl -s <the-url-above>/health | python -m json.tool
+```
+
+**If you want the demo asset rather than a live link**, `scripts/make_demo.py` records a real
+request and renders it to an animated SVG. Re-recording on the T4 with the 2.2B replaces the
+GTX 1650 stamp with a Tesla T4 one, and is the version worth committing if you have the quota:
+
+```python
+!python -m scripts.make_demo --port 8000 --max-tokens 24 --speed 4
 ```
 
 ### 10 · Bring it home
