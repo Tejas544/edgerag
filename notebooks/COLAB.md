@@ -204,6 +204,50 @@ Two checks while it runs:
 - **INT4 should still be ~4× slower than fp16.** That is D7's prediction and it survives the noise;
   what the clean session buys is the second decimal place, not the headline.
 
+### 8a · The fused paged-attention kernel: gate, then benchmark — ~4 min
+
+`CONTEXT.md` D3 chose gather-into-scratch over a fused kernel and promised to revisit if the copy
+exceeded ~25% of the paged attention path. D19 measured **72.7%**. The kernel now exists — and has
+**never been executed anywhere**, because Triton ships no Windows wheel and this project is
+developed on Windows. This cell is the first time it runs.
+
+Needs no model weights and no corpus: attention cost is a function of tensor shape and memory
+layout, not of the values in the tensors. Two minutes, and it can go first in a session.
+
+```python
+!pip install -q triton 2>&1 | tail -2
+!python -m scripts.colab_fused_attention --drive /content/drive/MyDrive/edgerag
+```
+
+Colab's PyTorch normally bundles Triton already, so the install is usually a no-op — but the run
+refuses outright rather than silently falling back to the slow reference if it is missing, because
+a "fused" benchmark measuring a Python loop would be a very convincing wrong number.
+
+**The equivalence gate runs first and the benchmark does not start if it fails.** That ordering is
+the point: timing an incorrect kernel produces a fast wrong number that looks exactly like a
+result. The gate sweeps sequence lengths either side of every block boundary and checks the kernel
+against *both* the reference and the shipping `gather` + SDPA path, with the pool's unowned blocks
+poisoned to `1e4` so an off-by-one mask fails loudly instead of subtly.
+
+**What the failures mean, if it fails:**
+
+- **Only lengths straddling a block boundary** (17, 33, 129, 513, 6759) — the `P-01` mask. The
+  kernel is attending to slots past `seq_len` that hold the previous tenant's data.
+- **Every length, by a small amount** — the online-softmax accumulation, most likely the `alpha`
+  rescale on the first block where the running maximum is still `-inf`.
+- **Every length, wildly** — pool indexing. The pool is head-major `(kv_heads, blocks, slots, dim)`
+  and a stride in the wrong order gives shaped garbage.
+
+**Reading the benchmark.** The prediction recorded in the script is **2–3× at the median request
+length, possibly a loss at short lengths** where the copy is small and launch overhead dominates.
+Removing 72.7% of the path implies 3.7×; a hand-written block loop does not get all of it. **A
+result above 3.7× means the comparison is wrong, not that the kernel is remarkable** — check that
+the `gather alone` column still reproduces D19's ~72.7% before believing any speedup beside it.
+
+**This does not wire the kernel into the server**, and should not until the gate is green. The
+decode path still runs `gather` + SDPA. Wiring it in is a separate change with its own equivalence
+run against the full model, and doing both at once would leave a failure with two candidate causes.
+
 ### 8bb · Close D24's cross-session latency gap — ~15 min
 
 D24 finding 3 is still open in one respect: the throughput column has never been measured with all

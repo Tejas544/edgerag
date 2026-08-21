@@ -433,9 +433,16 @@ and the predicted failure modes this design is built to avoid.
 - **The `peak` column mixes two code versions.** Six arms were measured before the prefill-logits
   fix and two after, a 272 MiB difference in the transient term. Weights and quality are
   unaffected. Records now stamp `code_version` so this cannot recur silently.
-- **The fused paged-attention kernel is not written.** The gather is 72.7% of the paged attention
-  path, well past the 25% threshold at which the design log said to revisit the decision. Triton
-  has no Windows support, so this is Colab-only work that has not been scheduled.
+- **The fused paged-attention kernel is written and has never been executed.** The gather is 72.7%
+  of the paged attention path, well past the 25% threshold at which the design log said to revisit
+  the decision, so [`edgerag/cache/fused.py`](edgerag/cache/fused.py) now carries a Triton kernel
+  that reads KV straight from the pool and never materialises the copy. **Triton ships no Windows
+  wheel, so it cannot run on this project's development machine at all** — the kernel is written
+  against a pure-PyTorch reference of the identical online-softmax recurrence, and it is *that*
+  reference which is tested locally, across every block boundary, against `gather` + SDPA. Until
+  [`scripts/colab_fused_attention.py`](scripts/colab_fused_attention.py) runs its equivalence gate
+  on a T4, the honest status is: the algorithm is verified, the translation of it is not. It is
+  deliberately **not** wired into the serving path for that reason.
 - **The pruning quality curve is n=40.** Standard error ~0.06; most gaps in that table are ties.
   More queries, not more ratios, is where the next hour of T4 time should go.
 - **4.000 GiB of 4.00 leaves exactly zero slack for the CUDA context, so this configuration would
@@ -486,6 +493,7 @@ and the predicted failure modes this design is built to avoid.
 | `scripts/` | Measurement runners. `measure_*` are exact and local; `colab_*` require a T4 |
 | `scripts/make_demo.py` | Records a real request against a running server, renders the README SVG |
 | `scripts/latency_coverage.py` | Which arms have single-session latency, and how to finish (no GPU) |
+| `edgerag/cache/fused.py` | Fused paged attention: Triton kernel + the PyTorch reference it was written against |
 | `edgerag/core/` | Model, layers, quantized linear, memory budget |
 | `edgerag/cache/` | Naive and paged KV cache, block allocator, copy-on-write |
 | `edgerag/sched/` | Continuous-batching scheduler, admission control |
