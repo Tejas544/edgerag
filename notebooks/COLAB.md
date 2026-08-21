@@ -42,6 +42,14 @@ a disconnect costs one measurement rather than the session.
 
 ### 3 · Clone and install
 
+> **The `%cd` in this cell is load-bearing for every later section.** `scripts/` is deliberately
+> not an installed package — `pyproject.toml` ships `edgerag*` and `bench*` only, because a
+> top-level `scripts` module in site-packages is a namespace collision waiting to happen — so
+> `python -m scripts.<x>` resolves through the *current directory*. Run this cell once and the
+> directory persists for the session. Jump straight to a later section in a fresh runtime and
+> every runner fails with `No module named 'scripts'`, which reads like a broken install and is
+> not one. §8a carries its own `%cd` for that reason; the rest assume this cell ran.
+
 ```python
 !git clone https://github.com/Tejas544/edgerag.git /content/edgerag
 %cd /content/edgerag
@@ -212,12 +220,31 @@ exceeded ~25% of the paged attention path. D19 measured **72.7%**. The kernel no
 developed on Windows. This cell is the first time it runs.
 
 Needs no model weights and no corpus: attention cost is a function of tensor shape and memory
-layout, not of the values in the tensors. Two minutes, and it can go first in a session.
+layout, not of the values in the tensors. Two minutes, and it is the one section that can genuinely
+go first in a session — **provided the cell brings its own repo**, which is what the first four
+lines below are for:
 
 ```python
-!pip install -q triton 2>&1 | tail -2
+import os
+if not os.path.isdir('/content/edgerag'):
+    !git clone -q https://github.com/Tejas544/edgerag.git /content/edgerag
+%cd /content/edgerag
+!git pull --ff-only
+!pip install -q -e . 2>&1 | tail -2
 !python -m scripts.colab_fused_attention --drive /content/drive/MyDrive/edgerag
 ```
+
+> **`No module named 'scripts'` means the cell ran from the wrong directory.** `pyproject.toml`
+> installs `edgerag*` and `bench*` only — `scripts/` is deliberately *not* a package, because a
+> top-level module called `scripts` in site-packages is a namespace collision waiting to happen.
+> So `python -m scripts.<x>` resolves through the current directory, and every runner in this
+> runbook needs the working directory to be the repo root. Steps 2–3 set it once and it persists;
+> a cell run *before* them does not inherit it. The `%cd` above makes this section independent of
+> that ordering.
+>
+> The `git pull` is not decoration either: `scripts/colab_fused_attention.py` is newer than most
+> clones, and a clone that predates it fails with the *same* `No module named` error for an
+> entirely different reason.
 
 Colab's PyTorch normally bundles Triton already, so the install is usually a no-op — but the run
 refuses outright rather than silently falling back to the slow reference if it is missing, because
@@ -255,10 +282,11 @@ eight arms in a single session, and cross-session `tok/s` carries ~7.5% clock va
 several of the gaps the table reports. Two earlier attempts were reclaimed part-way, and the
 resolution had to be reconstructed by hand from console output.
 
-**Ask the files what is missing rather than guessing.** This needs no GPU and runs anywhere,
-including before you start a runtime:
+**Ask the files what is missing rather than guessing.** This needs no GPU — but it does need the
+repo, and the working directory to be the repo root (see §8a's note on `No module named 'scripts'`):
 
 ```python
+%cd /content/edgerag
 !python -m scripts.latency_coverage
 ```
 
