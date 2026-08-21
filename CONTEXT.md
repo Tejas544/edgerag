@@ -1558,7 +1558,7 @@ would not load. That is a real limitation of the claim and not a rounding note.
 
 ---
 
-## D27 · The fused kernel: correct on first execution, 2.23× at the median · **MEASURED** · 2026-08-20
+## D27 · The fused kernel: correct on first execution, 1.72× at the median · **MEASURED, AMENDED** · 2026-08-20
 
 D3 chose gather-into-scratch and promised to revisit above ~25%. D19 measured 72.7%. The kernel
 now exists, and this is the run that closes the decision. Tesla T4, SmolVLM2-2.2B geometry
@@ -1578,60 +1578,69 @@ run here at all; splitting the problem into *get the algorithm right* (testable 
 lengths where the two agree to **zero** are the ones where the translation is provably faithful,
 not merely close.
 
-**Finding 2 — 2.23× at the trace's median request, inside the recorded prediction.**
+**Finding 2 — 1.72× at the trace's median request.** Two runs exist and **only the second is
+usable**; the first reported 2.23× and was wrong for a reason the first run had no way to show.
 
-| seq_len | gather+SDPA | fused | speedup |
-|---:|---:|---:|---:|
-| 128 | 0.116 ms | 0.131 ms | **0.89×** |
-| 512 | 0.248 ms | 0.217 ms | 1.14× |
-| 1024 | 0.449 ms | 0.345 ms | 1.30× |
-| 2048 | 0.613 ms | 0.421 ms | 1.46× |
-| 4096 | 1.144 ms | 0.724 ms | 1.58× |
-| **6758** | 1.834 ms | 0.824 ms | **2.23×** |
-| 7992 | 1.735 ms | 0.938 ms | 1.85× |
+| seq_len | gather+SDPA | ±  | fused | ± | gather K+V | speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 128 | 0.156 ms | 13.7% | 0.168 ms | 9.1% | 0.089 ms | **0.93×** |
+| 512 | 0.253 ms | 2.0% | 0.248 ms | 3.8% | 0.149 ms | 1.02× |
+| 1024 | 0.459 ms | 1.1% | 0.379 ms | 3.5% | 0.224 ms | 1.21× |
+| 2048 | 0.708 ms | 1.2% | 0.524 ms | 4.5% | 0.417 ms | 1.35× |
+| 4096 | 1.364 ms | 7.7% | 0.575 ms | 8.5% | 0.478 ms | *2.37×* |
+| **6758** | 1.495 ms | 1.0% | 0.870 ms | 5.9% | 0.792 ms | **1.72×** |
+| 7992 | 1.742 ms | 4.0% | 0.987 ms | 8.3% | 0.994 ms | 1.76× |
 
-The prediction was 2–3× at the median and *a loss at short lengths*; both held. The mechanism is
-that the copy scales with sequence length while kernel-launch overhead does not, so the crossover
-sits near 512 tokens and everything below it pays more in launch than it saves in bandwidth. The
-prediction also said **>3.7× would mean the comparison was wrong rather than the kernel
-remarkable**; 2.23× needs no such suspicion.
+The prediction was 2–3× at the median and a loss at short lengths. **The loss held (0.93× at 128,
+crossover at 512); the magnitude did not — 1.72× is below the predicted band.** The mechanism is
+still the one predicted: the copy scales with sequence length while launch overhead does not.
 
-**Finding 3 — two defects in the measurement, both mine, both found after the run.**
+*4096's 2.37× is an outlier and should not be quoted.* It carries 7.7%/8.5% spread and sits far
+off the trend its neighbours describe (1.35× at 2048, 1.72× at 6758); its baseline of 1.364 ms is
+implausibly close to 6758's 1.495 ms for half the sequence. **Read the trend: the speedup rises
+with length and plateaus near 1.7–1.8× above 4k.**
+
+**Finding 3 — three defects in the measurement, all mine. Two changed the headline.**
 
 *The `gather alone` column measured half the gather.* `PagedKVCache.gather` calls `_gather_pool`
-twice — once per pool — and the benchmark gathered only the key pool. **The printed 22.1% at the
-median should be read as roughly double that, ~44%.** Corrected locally, the K+V gather comes out
-at almost exactly 2× the K-only figure, as the arithmetic requires. The corrected number has not
-yet been measured on a T4.
+twice — once per pool — and the benchmark gathered only the key pool. Corrected, the median-request
+gather is **0.792 ms, not 0.406**, and the fraction **53.0%, not 22.1%**.
 
-*No variance was reported.* The run shows the **baseline running faster at 7,992 tokens than at
-6,758** (1.735 ms against 1.834 ms), which is impossible and is simply run-to-run spread presented
-as a point estimate — `00_FOUNDATIONS.md` §4 rule 4, violated by the script enforcing it elsewhere.
-The benchmark now carries relative standard deviation per row and flags any row above 10%.
-The 1.85× at 7,992 should be treated as indistinguishable from the 2.23× beside it until re-run.
+*No variance was reported, and it hid the headline.* Run 1 showed the **baseline running faster at
+7,992 tokens than at 6,758** (1.735 against 1.834 ms), which is impossible. That slow 6,758
+baseline is the entire difference between 2.23× and 1.72×: in run 2 the same row measures 1.495 ms
+at **1.0% relative deviation**, and the ordering is monotonic. **The 2.23× was a slow baseline
+sample, not a property of the kernel.**
 
-**Neither defect touches finding 2.** The speedup column is the ratio of two independently timed
-*complete* paths; it never reads the gather column. What is in question is the diagnostic, not the
-result.
+*Within-row deviation was not enough to catch it.* Run 1's bad row would have passed a 10% spread
+filter. What catches it is that both paths read more KV as the sequence grows, so **both timings
+must rise with sequence length** — a row that breaks that ordering contains an outlier regardless
+of its own spread, and the speedup divides by exactly that row. The benchmark now checks
+monotonicity and says so explicitly. Replayed against run 1 it flags `(6758, 7992)`; against run 2
+it flags nothing.
 
-**Finding 4 — and this one is unresolved: the gather fraction does not reconcile with D19.**
-D19 reported the gather at **72.7%** of the paged attention path (23.5 ms against 8.8 ms). This
-run reports 22.1%, or ~44% once finding 3 is corrected — and the absolute magnitudes differ by
-more than an order of magnitude. Candidate explanations, none confirmed:
+**Finding 4 — RESOLVED: the two gather measurements agree on the total and disagree on the
+split.** Both scripts were run in one session (`977bd606be73` / same T4), at ~6.8k tokens,
+block size 16:
 
-- D19's gather included a trailing `.contiguous()`. The current `_gather_pool` documents having
-  removed exactly that (*"One copy, not two… no transpose, and therefore no second
-  `contiguous()`"*), so **D19 may be timing a gather the code no longer performs.** Worth ~2×.
-- D19's figures may be per decode *step across all 24 layers* where these are per layer. 24 ×
-  0.81 ms ≈ 19 ms against D19's 23.5 ms, which is close — but a ratio should be invariant to that,
-  so it explains the magnitudes and not the fraction.
-- D19 timed attention with `eager_attention`; this run uses SDPA.
+| | gather term | attention term | total |
+|---|---:|---:|---:|
+| `colab_gather_overhead` | 1.050 ms | 0.393 ms | 1.443 ms → **72.7%** gather |
+| `colab_fused_attention` | 0.792 ms | 0.703 ms | 1.495 ms → **53.0%** gather |
 
-**The decision D3 asked for does not depend on resolving this.** At ~44% the threshold is crossed
-on this run's own terms, and the 2.23× is measured end to end regardless. But two measurements of
-"what fraction is the copy" disagreeing by 1.6× after correction is a live discrepancy, and the
-next fused-attention session should re-run `colab_gather_overhead` alongside this script in the
-same session rather than comparing across two.
+**The totals agree to 3.6%.** Neither measurement is wrong; they draw the line in different
+places. `colab_gather_overhead` *materialises a contiguous tensor* as part of its gather and then
+times attention over the finished article — and the giveaway is that its paged-attention figure
+(0.393 ms) is indistinguishable from its own already-contiguous-cache figure (0.395 ms).
+`colab_fused_attention` hands SDPA the non-contiguous view that `_gather_pool` actually returns,
+so **SDPA pays the copy internally and it lands in the attention term instead.**
+
+Same work, attributed differently. The consequence for the README: **53% is the figure that
+describes the shipping path**, because `_gather_pool` explicitly returns a view (*"One copy, not
+two… no transpose, and therefore no second `contiguous()`"*), while 72.7% describes a gather that
+includes a materialisation the shipping path defers. Both are above D3's 25% threshold, so the
+decision to write the kernel is unaffected — and so is the 1.72×, which is the ratio of two
+independently timed complete paths and never reads either fraction.
 
 **Not wired in.** The decode path still runs `gather` + SDPA. Wiring is a separate change with its
 own equivalence run against the full model, because a failure after doing both at once would have

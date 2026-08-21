@@ -276,20 +276,22 @@ decode path still runs `gather` + SDPA. Wiring it in is a separate change with i
 run against the full model, and doing both at once would leave a failure with two candidate causes.
 
 > ✅ **Measured 2026-08-20 — `CONTEXT.md` D27. The gate passed on the kernel's first execution**,
-> at all 16 lengths, with **exactly zero** deviation from the reference at eleven of them and
-> 9.8e-4 against `gather` + SDPA. **2.23× at the trace's median 6,758-token request**, inside the
-> recorded 2–3× prediction, with a *loss* (0.89×) at 128 tokens where launch overhead beats the
-> copy it saves. The crossover sits near 512.
+> at all 16 lengths, with **exactly zero** deviation from the reference at ten of them and 9.8e-4
+> against `gather` + SDPA. **1.72× at the trace's median 6,758-token request**, with a *loss*
+> (0.93×) at 128 tokens where launch overhead beats the copy it saves; crossover near 512, and a
+> plateau near 1.7–1.8× above 4k.
 >
-> **Two defects in that run's instrumentation are fixed and want re-measuring** (~2 min, same
-> cell). The `gather alone` column gathered only the key pool where `PagedKVCache.gather` gathers
-> both, so the printed 22.1% should be read as roughly **44%**; and no variance was reported, which
-> let the baseline appear *faster* at 7,992 tokens than at 6,758. Both are corrected — the table
-> now carries per-row relative standard deviation and flags anything above 10%.
+> **The first run of this cell reported 2.23× and was wrong** — its baseline sample at 6,758 was
+> slower than its own 7,992 sample, which is impossible. That one bad sample was the whole
+> difference. Two instrumentation fixes came out of it: the `gather alone` column had gathered
+> only the key pool (the corrected median gather is **0.792 ms / 53%**, not 0.406 / 22.1%), and
+> the table now reports per-row variance **and checks that both paths rise monotonically with
+> sequence length** — a 10% spread filter alone would not have caught the bad row.
 >
-> **The unresolved thing to watch on the re-run** is that even the corrected ~44% does not
-> reconcile with D19's 72.7%. If you have the quota, run this and `colab_gather_overhead` **in the
-> same session** — comparing them across sessions is what left the discrepancy ambiguous:
+> **D19's 72.7% is reconciled, not contradicted.** Run both scripts in one session and the totals
+> agree to 3.6%; only the attribution differs, because `colab_gather_overhead` materialises the
+> contiguous tensor inside its gather term while the shipping path leaves it a view for SDPA to
+> copy internally. Details in D27 finding 4. To reproduce:
 >
 > ```python
 > %cd /content/edgerag

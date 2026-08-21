@@ -31,6 +31,7 @@ is remarkable.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import statistics
@@ -309,6 +310,24 @@ def main(argv: list[str] | None = None) -> int:
               f"{', '.join(str(r['seq_len']) for r in noisy)}. Their speedups are not")
         print("  distinguishable from their neighbours' -- read the trend, not the individual "
               "cells.")
+
+    # Both paths read more KV as the sequence grows, so both timings must rise with it. A row that
+    # breaks that ordering contains an outlier no matter what its own spread says -- and because
+    # the speedup divides by that row, the outlier lands directly on the headline. The first T4
+    # run reported 2.23x at the median off a baseline sample that was slower than the *longer*
+    # sequence beside it; a within-row deviation check did not catch it, and this does.
+    for kind in ("gather_sdpa_ms", "fused_ms"):
+        breaks = [
+            (a["seq_len"], b["seq_len"])
+            for a, b in itertools.pairwise(rows)
+            if a[kind] > b[kind]
+        ]
+        for shorter, longer in breaks:
+            label = "baseline" if kind == "gather_sdpa_ms" else "fused"
+            print(f"\n  ** {label} at {shorter} tokens timed SLOWER than at {longer}. ** That is "
+                  "physically impossible --")
+            print(f"  one of the two is an outlier, and the speedup at {shorter} divides by it. "
+                  "Re-run before quoting it.")
 
     median_row = next((r for r in rows if r["seq_len"] == 6758), rows[-1])
     print(f"\n  At the trace's median request ({median_row['seq_len']} tokens): "
