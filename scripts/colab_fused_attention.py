@@ -181,15 +181,27 @@ def benchmark(
 
         n_kv_heads, _, _, head_dim = key_pool.shape
 
-        def gather_only(kp=key_pool, ids=block_ids, sl=seq_len, h=n_kv_heads, d=head_dim):
-            """Exactly ``PagedKVCache._gather_pool``, and no more than it.
+        def gather_only(
+            kp=key_pool, vp=value_pool, ids=block_ids, sl=seq_len, h=n_kv_heads, d=head_dim
+        ):
+            """Exactly what ``PagedKVCache.gather`` does: **both** pools, and nothing else.
 
-            The advanced index is the copy; the reshape, the slice and the unsqueeze are all
-            views. An earlier version of this ended in ``.contiguous()``, which the shipping path
-            does not call -- it hands the sliced view straight to SDPA -- and that timed a second
-            copy nothing performs, inflating the very fraction this column exists to report.
+            Two corrections live in this function, and both of them moved the number it reports.
+
+            It once ended in ``.contiguous()``, which the shipping path never calls -- it hands
+            the sliced view straight to SDPA -- so it was timing a second copy nothing performs.
+
+            It then gathered only the *key* pool. ``PagedKVCache.gather`` calls ``_gather_pool``
+            twice, once per pool, so half the copy was missing from a column whose entire job is
+            to say how large the copy is. That under-reported the gather by ~2x in the first T4
+            run, and the fraction printed there (22.1% at the median) should be read as roughly
+            half of the truth.
+
+            The advanced index is the copy; the reshape, the slice and the unsqueeze are views.
             """
-            return kp[:, ids].reshape(h, -1, d)[:, :sl].unsqueeze(0)
+            keys = kp[:, ids].reshape(h, -1, d)[:, :sl].unsqueeze(0)
+            values = vp[:, ids].reshape(h, -1, d)[:, :sl].unsqueeze(0)
+            return keys, values
 
         shipping = _time(
             lambda q=query, kp=key_pool, vp=value_pool, ids=block_ids, sl=seq_len: (
@@ -208,11 +220,19 @@ def benchmark(
         ship_ms = statistics.median(shipping) * 1e3
         fused_ms = statistics.median(fused) * 1e3
         gather_ms = statistics.median(gather) * 1e3
+        # "A single number is not a result" (00_FOUNDATIONS.md §4 rule 4). The first T4 run showed
+        # the *baseline* running faster at 7,992 tokens than at 6,758, which is impossible and was
+        # simply run-to-run spread being reported as a point estimate. Carrying the relative
+        # deviation makes a speedup that sits inside the noise visible as one.
+        ship_rsd = statistics.stdev(shipping) / statistics.mean(shipping) if iters > 1 else 0.0
+        fused_rsd = statistics.stdev(fused) / statistics.mean(fused) if iters > 1 else 0.0
         rows.append({
             "seq_len": seq_len,
             "gather_sdpa_ms": ship_ms,
             "fused_ms": fused_ms,
             "gather_alone_ms": gather_ms,
+            "gather_sdpa_rsd": ship_rsd,
+            "fused_rsd": fused_rsd,
             # D19's headline fraction, recomputed here so the two runs can be compared directly.
             "gather_fraction_of_shipping": gather_ms / ship_ms if ship_ms else 0.0,
             "speedup": ship_ms / fused_ms if fused_ms else 0.0,
@@ -275,12 +295,20 @@ def main(argv: list[str] | None = None) -> int:
 
     print("=== benchmark ===")
     rows = benchmark(spec, args.block_size, "cuda", torch.float16, args.iters, args.warmup)
-    print(f"{'seq_len':>8}{'gather+SDPA':>13}{'fused':>10}{'gather alone':>14}"
-          f"{'gather %':>10}{'speedup':>9}")
+    print(f"{'seq_len':>8}{'gather+SDPA':>13}{'+/-':>7}{'fused':>9}{'+/-':>7}"
+          f"{'gather K+V':>12}{'gather %':>10}{'speedup':>9}")
     for row in rows:
-        print(f"{row['seq_len']:>8}{row['gather_sdpa_ms']:>12.3f}m{row['fused_ms']:>9.3f}m"
-              f"{row['gather_alone_ms']:>13.3f}m"
+        print(f"{row['seq_len']:>8}{row['gather_sdpa_ms']:>12.3f}m"
+              f"{row['gather_sdpa_rsd']:>6.1%}{row['fused_ms']:>8.3f}m{row['fused_rsd']:>6.1%}"
+              f"{row['gather_alone_ms']:>11.3f}m"
               f"{row['gather_fraction_of_shipping']:>9.1%}{row['speedup']:>8.2f}x")
+
+    noisy = [r for r in rows if max(r["gather_sdpa_rsd"], r["fused_rsd"]) > 0.10]
+    if noisy:
+        print(f"\n  {len(noisy)} row(s) with >10% run-to-run spread: "
+              f"{', '.join(str(r['seq_len']) for r in noisy)}. Their speedups are not")
+        print("  distinguishable from their neighbours' -- read the trend, not the individual "
+              "cells.")
 
     median_row = next((r for r in rows if r["seq_len"] == 6758), rows[-1])
     print(f"\n  At the trace's median request ({median_row['seq_len']} tokens): "

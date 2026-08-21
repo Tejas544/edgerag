@@ -275,6 +275,28 @@ the `gather alone` column still reproduces D19's ~72.7% before believing any spe
 decode path still runs `gather` + SDPA. Wiring it in is a separate change with its own equivalence
 run against the full model, and doing both at once would leave a failure with two candidate causes.
 
+> ✅ **Measured 2026-08-20 — `CONTEXT.md` D27. The gate passed on the kernel's first execution**,
+> at all 16 lengths, with **exactly zero** deviation from the reference at eleven of them and
+> 9.8e-4 against `gather` + SDPA. **2.23× at the trace's median 6,758-token request**, inside the
+> recorded 2–3× prediction, with a *loss* (0.89×) at 128 tokens where launch overhead beats the
+> copy it saves. The crossover sits near 512.
+>
+> **Two defects in that run's instrumentation are fixed and want re-measuring** (~2 min, same
+> cell). The `gather alone` column gathered only the key pool where `PagedKVCache.gather` gathers
+> both, so the printed 22.1% should be read as roughly **44%**; and no variance was reported, which
+> let the baseline appear *faster* at 7,992 tokens than at 6,758. Both are corrected — the table
+> now carries per-row relative standard deviation and flags anything above 10%.
+>
+> **The unresolved thing to watch on the re-run** is that even the corrected ~44% does not
+> reconcile with D19's 72.7%. If you have the quota, run this and `colab_gather_overhead` **in the
+> same session** — comparing them across sessions is what left the discrepancy ambiguous:
+>
+> ```python
+> %cd /content/edgerag
+> !python -m scripts.colab_gather_overhead --drive /content/drive/MyDrive/edgerag
+> !python -m scripts.colab_fused_attention --drive /content/drive/MyDrive/edgerag
+> ```
+
 ### 8bb · Close D24's cross-session latency gap — ~15 min
 
 D24 finding 3 is still open in one respect: the throughput column has never been measured with all

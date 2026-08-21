@@ -256,10 +256,25 @@ Exact allocator arithmetic over all 650 trace requests (`results/paged_memory.js
   the scheduler possible at all.
 
 **The gather is the cost.** Paged attention itself is free (+0.55% against attention over an
-already-contiguous cache), but materialising the gathered KV costs **72.7% of the paged attention
-path** at the median request length — 23.5 ms per decode step against 8.8 ms of attention. A
-head-major pool layout took ~20% off that and did not change the conclusion: the fused kernel is
-required, not optional, and it is not written.
+already-contiguous cache), but materialising the gathered KV is the dominant term — D19 put it at
+**72.7% of the paged attention path** at the median request length, 23.5 ms per decode step
+against 8.8 ms of attention. A head-major pool layout took ~20% off that and did not change the
+conclusion: the fused kernel is required, not optional.
+
+**It is now written and measured, and it is 2.23× faster.** `edgerag/cache/fused.py` walks the
+block table and computes attention straight out of the pool with an online-softmax recurrence,
+never materialising the copy. On a T4 at the trace's median 6,758-token request it runs in
+**0.824 ms against `gather` + SDPA's 1.834 ms**, and it *loses* below ~512 tokens where the copy
+is small and kernel-launch overhead dominates. It passed its equivalence gate at all 16 sweep
+lengths on its first execution — the kernel was written against a PyTorch reference of the same
+recurrence, and it is that reference which is tested locally, because Triton has no Windows wheel
+and the kernel cannot run on the machine it was written on.
+
+Two caveats, both in [`CONTEXT.md`](CONTEXT.md) D27: the run's own gather-fraction column was
+under-reporting by ~2× (it gathered the key pool only), and that corrected figure still does not
+reconcile with D19's 72.7%. The **2.23× is unaffected** — it is the ratio of two independently
+timed complete paths and never reads the fraction — but the diagnostic needs re-running before
+either number is quoted against the other.
 
 ### The serving layer under load
 
@@ -433,16 +448,18 @@ and the predicted failure modes this design is built to avoid.
 - **The `peak` column mixes two code versions.** Six arms were measured before the prefill-logits
   fix and two after, a 272 MiB difference in the transient term. Weights and quality are
   unaffected. Records now stamp `code_version` so this cannot recur silently.
-- **The fused paged-attention kernel is written and has never been executed.** The gather is 72.7%
-  of the paged attention path, well past the 25% threshold at which the design log said to revisit
-  the decision, so [`edgerag/cache/fused.py`](edgerag/cache/fused.py) now carries a Triton kernel
-  that reads KV straight from the pool and never materialises the copy. **Triton ships no Windows
-  wheel, so it cannot run on this project's development machine at all** — the kernel is written
-  against a pure-PyTorch reference of the identical online-softmax recurrence, and it is *that*
-  reference which is tested locally, across every block boundary, against `gather` + SDPA. Until
-  [`scripts/colab_fused_attention.py`](scripts/colab_fused_attention.py) runs its equivalence gate
-  on a T4, the honest status is: the algorithm is verified, the translation of it is not. It is
-  deliberately **not** wired into the serving path for that reason.
+- **The fused paged-attention kernel is measured but not wired in.** It passed its equivalence
+  gate on a T4 at all 16 sequence lengths — exactly zero deviation from the reference at eleven of
+  them — and runs **2.23× faster than `gather` + SDPA at the trace's median request**
+  ([`CONTEXT.md`](CONTEXT.md) D27). The decode path still runs `gather` + SDPA: wiring it in is a
+  separate change with its own equivalence run against the full model, because a failure after
+  doing both at once would have two candidate causes.
+- **The gather-fraction diagnostic does not reconcile with the earlier measurement**, and that is
+  unresolved. D19 put the copy at 72.7% of the paged attention path; the fused run puts it near
+  44% once a bug in its own instrumentation is corrected — it gathered only the key pool, where
+  `PagedKVCache.gather` gathers both. The candidate explanations are in D27 finding 4. The 2.23×
+  is unaffected either way, being the ratio of two independently timed complete paths, but the two
+  fraction measurements need to be re-run in one session before either is quoted.
 - **The pruning quality curve is n=40.** Standard error ~0.06; most gaps in that table are ties.
   More queries, not more ratios, is where the next hour of T4 time should go.
 - **4.000 GiB of 4.00 leaves exactly zero slack for the CUDA context, so this configuration would

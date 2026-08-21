@@ -1558,6 +1558,87 @@ would not load. That is a real limitation of the claim and not a rounding note.
 
 ---
 
+## D27 · The fused kernel: correct on first execution, 2.23× at the median · **MEASURED** · 2026-08-20
+
+D3 chose gather-into-scratch and promised to revisit above ~25%. D19 measured 72.7%. The kernel
+now exists, and this is the run that closes the decision. Tesla T4, SmolVLM2-2.2B geometry
+(32 q heads, 32 kv heads, head_dim 64), block size 16, fp16, no weights loaded.
+
+**Finding 1 — the gate passed on the kernel's first-ever execution, at all 16 lengths.** Against
+the PyTorch reference the maximum absolute deviation was **6.1e-5**, and at eleven of sixteen
+lengths it was **exactly zero**. Against the shipping `gather` + SDPA path it was **9.8e-4**,
+inside the 2e-3 fp16 tolerance.
+
+That outcome is the argument for how it was built. The kernel was written against a pure-PyTorch
+reference of the identical online-softmax recurrence, and the reference was tested locally across
+every block boundary — under poisoned slack blocks, GQA, scattered block tables, and logits large
+enough to break a naive blockwise softmax. Triton has no Windows wheel, so the kernel could not be
+run here at all; splitting the problem into *get the algorithm right* (testable locally) and
+*translate it* (one T4 cell) is why an unrunnable program was correct the first time it ran. The
+lengths where the two agree to **zero** are the ones where the translation is provably faithful,
+not merely close.
+
+**Finding 2 — 2.23× at the trace's median request, inside the recorded prediction.**
+
+| seq_len | gather+SDPA | fused | speedup |
+|---:|---:|---:|---:|
+| 128 | 0.116 ms | 0.131 ms | **0.89×** |
+| 512 | 0.248 ms | 0.217 ms | 1.14× |
+| 1024 | 0.449 ms | 0.345 ms | 1.30× |
+| 2048 | 0.613 ms | 0.421 ms | 1.46× |
+| 4096 | 1.144 ms | 0.724 ms | 1.58× |
+| **6758** | 1.834 ms | 0.824 ms | **2.23×** |
+| 7992 | 1.735 ms | 0.938 ms | 1.85× |
+
+The prediction was 2–3× at the median and *a loss at short lengths*; both held. The mechanism is
+that the copy scales with sequence length while kernel-launch overhead does not, so the crossover
+sits near 512 tokens and everything below it pays more in launch than it saves in bandwidth. The
+prediction also said **>3.7× would mean the comparison was wrong rather than the kernel
+remarkable**; 2.23× needs no such suspicion.
+
+**Finding 3 — two defects in the measurement, both mine, both found after the run.**
+
+*The `gather alone` column measured half the gather.* `PagedKVCache.gather` calls `_gather_pool`
+twice — once per pool — and the benchmark gathered only the key pool. **The printed 22.1% at the
+median should be read as roughly double that, ~44%.** Corrected locally, the K+V gather comes out
+at almost exactly 2× the K-only figure, as the arithmetic requires. The corrected number has not
+yet been measured on a T4.
+
+*No variance was reported.* The run shows the **baseline running faster at 7,992 tokens than at
+6,758** (1.735 ms against 1.834 ms), which is impossible and is simply run-to-run spread presented
+as a point estimate — `00_FOUNDATIONS.md` §4 rule 4, violated by the script enforcing it elsewhere.
+The benchmark now carries relative standard deviation per row and flags any row above 10%.
+The 1.85× at 7,992 should be treated as indistinguishable from the 2.23× beside it until re-run.
+
+**Neither defect touches finding 2.** The speedup column is the ratio of two independently timed
+*complete* paths; it never reads the gather column. What is in question is the diagnostic, not the
+result.
+
+**Finding 4 — and this one is unresolved: the gather fraction does not reconcile with D19.**
+D19 reported the gather at **72.7%** of the paged attention path (23.5 ms against 8.8 ms). This
+run reports 22.1%, or ~44% once finding 3 is corrected — and the absolute magnitudes differ by
+more than an order of magnitude. Candidate explanations, none confirmed:
+
+- D19's gather included a trailing `.contiguous()`. The current `_gather_pool` documents having
+  removed exactly that (*"One copy, not two… no transpose, and therefore no second
+  `contiguous()`"*), so **D19 may be timing a gather the code no longer performs.** Worth ~2×.
+- D19's figures may be per decode *step across all 24 layers* where these are per layer. 24 ×
+  0.81 ms ≈ 19 ms against D19's 23.5 ms, which is close — but a ratio should be invariant to that,
+  so it explains the magnitudes and not the fraction.
+- D19 timed attention with `eager_attention`; this run uses SDPA.
+
+**The decision D3 asked for does not depend on resolving this.** At ~44% the threshold is crossed
+on this run's own terms, and the 2.23× is measured end to end regardless. But two measurements of
+"what fraction is the copy" disagreeing by 1.6× after correction is a live discrepancy, and the
+next fused-attention session should re-run `colab_gather_overhead` alongside this script in the
+same session rather than comparing across two.
+
+**Not wired in.** The decode path still runs `gather` + SDPA. Wiring is a separate change with its
+own equivalence run against the full model, because a failure after doing both at once would have
+two candidate causes.
+
+---
+
 ## Pending — decide before the phase that needs it
 
 | # | Question | Needed by |
