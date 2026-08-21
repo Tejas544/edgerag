@@ -226,8 +226,13 @@ read.
 
 ```python
 %cd /content/edgerag
+!git pull --ff-only
 !python -m scripts.measure_cuda_context --drive /content/drive/MyDrive/edgerag
 ```
+
+> If this reports `No module named scripts.measure_cuda_context` while `git pull` says
+> `Already up to date`, the commit adding the script has not been pushed — see the note under
+> §8a, which distinguishes that from the wrong-directory failure that produces a similar message.
 
 **A Colab T4 is the right instrument and the dev box is not**, which the script says for itself.
 It refuses to publish when the card has more than one tenant or when the baseline drifts by more
@@ -263,17 +268,27 @@ if not os.path.isdir('/content/edgerag'):
 !python -m scripts.colab_fused_attention --drive /content/drive/MyDrive/edgerag
 ```
 
-> **`No module named 'scripts'` means the cell ran from the wrong directory.** `pyproject.toml`
-> installs `edgerag*` and `bench*` only — `scripts/` is deliberately *not* a package, because a
-> top-level module called `scripts` in site-packages is a namespace collision waiting to happen.
-> So `python -m scripts.<x>` resolves through the current directory, and every runner in this
-> runbook needs the working directory to be the repo root. Steps 2–3 set it once and it persists;
-> a cell run *before* them does not inherit it. The `%cd` above makes this section independent of
-> that ordering.
+> **Two `No module named` failures look alike and mean opposite things. Read which one you got.**
 >
-> The `git pull` is not decoration either: `scripts/colab_fused_attention.py` is newer than most
-> clones, and a clone that predates it fails with the *same* `No module named` error for an
-> entirely different reason.
+> **`No module named 'scripts'`** — the *package* did not resolve, so the cell ran from the wrong
+> directory. `pyproject.toml` installs `edgerag*` and `bench*` only; `scripts/` is deliberately
+> *not* a package, because a top-level module called `scripts` in site-packages is a namespace
+> collision waiting to happen. So `python -m scripts.<x>` resolves through the current directory,
+> and every runner here needs the working directory to be the repo root. Steps 2–3 set it once and
+> it persists; a cell run *before* them does not inherit it. The `%cd` above fixes this.
+>
+> **`No module named scripts.<something>`** — the package resolved and *the file is not there*.
+> The working directory is fine; the clone is behind. Almost always this means the commit adding
+> that script **has not been pushed to GitHub yet**, in which case `git pull` cheerfully reports
+> `Already up to date` because there is genuinely nothing to fetch. Check on the machine that owns
+> the repo:
+>
+> ```bash
+> git status -sb          # "ahead N" means N commits exist only locally
+> git push origin main
+> ```
+>
+> Then re-run the cell. This is not a Colab problem and no amount of re-cloning fixes it.
 
 Colab's PyTorch normally bundles Triton already, so the install is usually a no-op — but the run
 refuses outright rather than silently falling back to the slow reference if it is missing, because
