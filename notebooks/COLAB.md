@@ -212,6 +212,35 @@ Two checks while it runs:
 - **INT4 should still be ~4× slower than fp16.** That is D7's prediction and it survives the noise;
   what the clean session buys is the second decimal place, not the headline.
 
+### 8·0 · What the CUDA context costs — ~30 s, closes P3
+
+Every memory table in this project ends with *"excludes the CUDA context, 300–600 MiB on Turing,
+**not measured on this device**"*. That parenthetical has been carried since Phase 0 and it is the
+last unmeasured term in the budget. D26 made it urgent: the serving configuration lands at
+**4.000 GiB of a 4.00 GiB budget**, so there is zero slack to absorb a term nobody has weighed.
+
+Thirty seconds, no weights, no corpus. Run it before anything else has touched the GPU — **the
+baseline is taken before this process creates a context, and a runtime that has already run a
+model will report a context of roughly zero** because it was already there when the baseline was
+read.
+
+```python
+%cd /content/edgerag
+!python -m scripts.measure_cuda_context --drive /content/drive/MyDrive/edgerag
+```
+
+**A Colab T4 is the right instrument and the dev box is not**, which the script says for itself.
+It refuses to publish when the card has more than one tenant or when the baseline drifts by more
+than 10% of the signal — on the Windows development machine that is 25 processes and a display
+attached to the same card, and the residual there (69 MiB) is recorded as `trusted: false`. A T4
+is headless and single-tenant, so it should publish.
+
+**What to read.** Three stages: bare context, after a block pool exists, after real GEMM/SDPA/
+gather kernels have run. The third is the one the budget needs — CUDA loads modules lazily, so a
+figure taken at init understates what a running pipeline holds. If the total leaves less than
+4 GiB free on a 16 GiB T4 the arithmetic is fine; the number that matters is what it implies for a
+*physical* 4 GB card, which the script prints as "the largest pipeline that does fit".
+
 ### 8a · The fused paged-attention kernel: gate, then benchmark — ~4 min
 
 `CONTEXT.md` D3 chose gather-into-scratch over a fused kernel and promised to revisit if the copy

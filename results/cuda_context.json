@@ -1,0 +1,130 @@
+{
+  "measurements": [
+    {
+      "device": "NVIDIA GeForce GTX 1650",
+      "compute_capability": "7.5",
+      "total_memory_bytes": 4294639616,
+      "torch_version": "2.6.0+cu124",
+      "cuda_version": "12.4",
+      "baseline_used_bytes": 1153433600,
+      "stages_bytes": {
+        "after_init": 53477376,
+        "after_pool": 61865984,
+        "after_kernels": 72351744
+      },
+      "context_bytes": 72351744,
+      "pool_blocks": 471,
+      "block_size": 16,
+      "other_processes": [
+        {
+          "pid": "1828",
+          "used_mib": null
+        },
+        {
+          "pid": "11432",
+          "used_mib": null
+        },
+        {
+          "pid": "17420",
+          "used_mib": null
+        },
+        {
+          "pid": "5492",
+          "used_mib": null
+        },
+        {
+          "pid": "13952",
+          "used_mib": null
+        },
+        {
+          "pid": "13960",
+          "used_mib": null
+        },
+        {
+          "pid": "27596",
+          "used_mib": null
+        },
+        {
+          "pid": "27556",
+          "used_mib": null
+        },
+        {
+          "pid": "21928",
+          "used_mib": null
+        },
+        {
+          "pid": "20864",
+          "used_mib": null
+        },
+        {
+          "pid": "35260",
+          "used_mib": null
+        },
+        {
+          "pid": "35968",
+          "used_mib": null
+        },
+        {
+          "pid": "25032",
+          "used_mib": null
+        },
+        {
+          "pid": "37080",
+          "used_mib": null
+        },
+        {
+          "pid": "35564",
+          "used_mib": null
+        },
+        {
+          "pid": "37792",
+          "used_mib": null
+        },
+        {
+          "pid": "28704",
+          "used_mib": null
+        },
+        {
+          "pid": "35976",
+          "used_mib": null
+        },
+        {
+          "pid": "11212",
+          "used_mib": null
+        },
+        {
+          "pid": "36440",
+          "used_mib": null
+        },
+        {
+          "pid": "7984",
+          "used_mib": null
+        },
+        {
+          "pid": "2208",
+          "used_mib": null
+        },
+        {
+          "pid": "16688",
+          "used_mib": null
+        },
+        {
+          "pid": "3260",
+          "used_mib": null
+        },
+        {
+          "pid": "5604",
+          "used_mib": null
+        },
+        {
+          "pid": "10460",
+          "used_mib": null
+        }
+      ],
+      "free_after_bytes": 1930166272,
+      "trusted": false,
+      "budget_gib": 4.0,
+      "pipeline_headroom_bytes": 4222287872
+    }
+  ]
+}

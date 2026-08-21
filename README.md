@@ -470,11 +470,14 @@ and the predicted failure modes this design is built to avoid.
   be smaller, and it has not been measured.
 - **The pruning quality curve is n=40.** Standard error ~0.06; most gaps in that table are ties.
   More queries, not more ratios, is where the next hour of T4 time should go.
-- **4.000 GiB of 4.00 leaves exactly zero slack for the CUDA context, so this configuration would
-  not load on a real 4 GB card.** The context is 300–600 MiB on Turing, it sits outside
-  `max_memory_allocated` entirely, and it has still never been measured (P3). The budget is a
-  *pipeline* budget and always was; against a physical 4 GB device the honest target is nearer
-  3.5 GiB, which is 168 fewer blocks and roughly 2,700 fewer admissible prompt tokens.
+- **4.000 GiB of 4.00 leaves exactly zero slack for the CUDA context, and the context is still
+  not measured on a trustworthy device.** [`scripts/measure_cuda_context.py`](scripts/measure_cuda_context.py)
+  now exists and closes the measurement half of P3, but it **refuses to publish from the
+  development machine** — a card with a display attached and 25 other processes on it is not an
+  instrument for a signal this size, and the residual it produces there (69 MiB) is stamped
+  `trusted: false`. A headless single-tenant T4 will publish; that run has not happened. The
+  budget remains a *pipeline* budget, defined on `max_memory_allocated`, which cannot see this
+  memory at all.
 - **The 4.000 GiB total is computed from two measured terms, not measured end to end.** Weights
   are exact and T4-confirmed, activation is measured, the pool is derived — but nothing has yet
   booted the server under `MemoryBudget(4.0)` and watched the peak. That class has existed since
